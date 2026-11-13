@@ -111,7 +111,7 @@ impl EgressManager {
                 "-i".to_string(), "pipe:0".to_string(),
             ];
 
-            // Always transcode with fixed output canvas.
+            // Transcode with fixed output canvas, or pass the video through.
             // Uses scale+pad to letterbox/pillarbox any input resolution onto the output canvas.
             // This prevents crashes when switching between sources with different resolutions.
             let cfg = output_config.as_ref().cloned().unwrap_or(crate::routes::output::OutputConfig::default());
@@ -120,29 +120,44 @@ impl EgressManager {
                 cfg.width, cfg.height, cfg.fps, cfg.video_bitrate_kbps, dest.name
             );
 
-            // scale to fit within canvas preserving aspect ratio, then pad to exact canvas size (black bars)
-            let vf = format!(
-                "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
-                cfg.width, cfg.height, cfg.width, cfg.height
-            );
+            if cfg.egress_copy_video {
+                // Program is already H.264 at the output canvas (scene
+                // compositor): pass the video through untouched and only
+                // transcode the audio to AAC. Saves one full encode per
+                // destination — essential on low-power SoCs.
+                args.extend([
+                    "-c:v".to_string(), "copy".to_string(),
+                    "-c:a".to_string(), "aac".to_string(),
+                    "-b:a".to_string(), format!("{}k", cfg.audio_bitrate_kbps),
+                    "-ar".to_string(), "48000".to_string(),
+                    // Downmix to stereo: the native AAC encoder rejects 5.1/6-channel input.
+                    "-ac".to_string(), "2".to_string(),
+                ]);
+            } else {
+                // scale to fit within canvas preserving aspect ratio, then pad to exact canvas size (black bars)
+                let vf = format!(
+                    "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
+                    cfg.width, cfg.height, cfg.width, cfg.height
+                );
 
-            args.extend([
-                "-vf".to_string(), vf,
-                "-c:v".to_string(), "libx264".to_string(),
-                "-preset".to_string(), "medium".to_string(),
-                "-tune".to_string(), "zerolatency".to_string(),
-                "-b:v".to_string(), format!("{}k", cfg.video_bitrate_kbps),
-                "-maxrate".to_string(), format!("{}k", cfg.video_bitrate_kbps),
-                "-bufsize".to_string(), format!("{}k", cfg.video_bitrate_kbps * 2),
-                "-g".to_string(), format!("{}", cfg.fps * 2),
-                "-r".to_string(), format!("{}", cfg.fps),
-                "-pix_fmt".to_string(), "yuv420p".to_string(),
-                "-c:a".to_string(), "aac".to_string(),
-                "-b:a".to_string(), format!("{}k", cfg.audio_bitrate_kbps),
-                "-ar".to_string(), "48000".to_string(),
-                // Downmix to stereo: the native AAC encoder rejects 5.1/6-channel input.
-                "-ac".to_string(), "2".to_string(),
-            ]);
+                args.push("-vf".to_string());
+                args.push(vf);
+                // Encoder from the output config (libx264 upstream default,
+                // h264_v4l2m2m on SoCs with a V4L2 hardware encoder).
+                crate::encoder::push_encoder_args(&mut args, cfg.video_encoder, "medium");
+                args.extend([
+                    "-b:v".to_string(), format!("{}k", cfg.video_bitrate_kbps),
+                    "-maxrate".to_string(), format!("{}k", cfg.video_bitrate_kbps),
+                    "-bufsize".to_string(), format!("{}k", cfg.video_bitrate_kbps * 2),
+                    "-g".to_string(), format!("{}", cfg.fps * 2),
+                    "-r".to_string(), format!("{}", cfg.fps),
+                    "-c:a".to_string(), "aac".to_string(),
+                    "-b:a".to_string(), format!("{}k", cfg.audio_bitrate_kbps),
+                    "-ar".to_string(), "48000".to_string(),
+                    // Downmix to stereo: the native AAC encoder rejects 5.1/6-channel input.
+                    "-ac".to_string(), "2".to_string(),
+                ]);
+            }
 
             args.extend([
                 "-f".to_string(), "flv".to_string(),

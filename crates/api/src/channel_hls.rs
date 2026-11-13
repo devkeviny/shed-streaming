@@ -71,7 +71,7 @@ impl ChannelHls {
             cfg.width, cfg.height, cfg.width, cfg.height
         );
 
-        let args: Vec<String> = vec![
+        let mut args: Vec<String> = vec![
             "-hide_banner".into(),
             "-loglevel".into(),
             "warning".into(),
@@ -81,12 +81,11 @@ impl ChannelHls {
             "pipe:0".into(),
             "-vf".into(),
             vf,
-            "-c:v".into(),
-            "libx264".into(),
-            "-preset".into(),
-            "veryfast".into(),
-            "-tune".into(),
-            "zerolatency".into(),
+        ];
+        // Encoder from the output config (libx264 upstream default,
+        // h264_v4l2m2m on SoCs with a V4L2 hardware encoder).
+        crate::encoder::push_encoder_args(&mut args, cfg.video_encoder, "veryfast");
+        args.extend([
             "-b:v".into(),
             format!("{}k", cfg.video_bitrate_kbps),
             "-maxrate".into(),
@@ -100,8 +99,6 @@ impl ChannelHls {
             // Align keyframes to ~2s HLS segment boundaries.
             "-force_key_frames".into(),
             "expr:gte(t,n_forced*2)".into(),
-            "-pix_fmt".into(),
-            "yuv420p".into(),
             "-c:a".into(),
             "aac".into(),
             "-b:a".into(),
@@ -125,7 +122,7 @@ impl ChannelHls {
             "-hls_segment_filename".into(),
             segment.display().to_string(),
             playlist.display().to_string(),
-        ];
+        ]);
 
         tracing::info!("starting channel HLS → {}", playlist.display());
 

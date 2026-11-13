@@ -9,6 +9,7 @@ use tokio::process::Command;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::routes::output::OutputConfig;
 use crate::state::AppState;
 
 /// Start playing a media file into the source's media relay.
@@ -20,6 +21,7 @@ pub async fn start_media_playback(
     file_path: &Path,
     loop_mode: &str,
 ) -> Result<(), String> {
+    let cfg = load_output_config(&state).await;
     let relay_tx = state.get_or_create_media_relay(source_id).await;
 
     let is_image = matches!(
@@ -57,15 +59,10 @@ pub async fn start_media_playback(
         file_path.to_string_lossy().into_owned(),
     ]);
 
+    // Encoder from the output config (libx264 upstream default,
+    // h264_v4l2m2m on SoCs with a V4L2 hardware encoder).
+    crate::encoder::push_encoder_args(&mut args, cfg.video_encoder, "veryfast");
     args.extend([
-        "-c:v".into(),
-        "libx264".into(),
-        "-preset".into(),
-        "veryfast".into(),
-        "-tune".into(),
-        "zerolatency".into(),
-        "-pix_fmt".into(),
-        "yuv420p".into(),
         "-g".into(),
         "60".into(),
         "-r".into(),
@@ -163,6 +160,7 @@ pub async fn start_concat_playback(
     if files.is_empty() {
         return Err("empty playlist".into());
     }
+    let cfg = load_output_config(&state).await;
     let relay_tx = state.get_or_create_media_relay(source_id).await;
 
     // Write a concat list file. Single quotes in paths are escaped per the
@@ -194,8 +192,11 @@ pub async fn start_concat_playback(
         "-re".into(), "-f".into(), "concat".into(), "-safe".into(), "0".into(),
         "-i".into(), list_path.to_string_lossy().into_owned(),
         "-vf".into(), vf,
-        "-c:v".into(), "libx264".into(), "-preset".into(), "veryfast".into(),
-        "-tune".into(), "zerolatency".into(), "-pix_fmt".into(), "yuv420p".into(),
+    ]);
+    // Encoder from the output config (libx264 upstream default,
+    // h264_v4l2m2m on SoCs with a V4L2 hardware encoder).
+    crate::encoder::push_encoder_args(&mut args, cfg.video_encoder, "veryfast");
+    args.extend([
         "-g".into(), format!("{}", fps * 2), "-r".into(), format!("{}", fps), "-b:v".into(), "3000k".into(),
         "-c:a".into(), "aac".into(), "-b:a".into(), "128k".into(), "-ar".into(), "48000".into(),
         "-ac".into(), "2".into(),
@@ -327,4 +328,14 @@ pub async fn stop_media_playback(state: &AppState, source_id: &Uuid) {
     }
     state.remove_media_relay(source_id).await;
     state.sequence_headers.write().await.remove(source_id);
+}
+
+async fn load_output_config(state: &AppState) -> OutputConfig {
+    sqlx::query_as::<_, (String,)>("SELECT value FROM settings WHERE key = 'output_config'")
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|(json,)| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
 }

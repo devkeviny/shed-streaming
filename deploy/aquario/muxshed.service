@@ -1,0 +1,29 @@
+[Unit]
+Description=Muxshed live production studio (Aquario S905W)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/lib/muxshed
+ExecStart=/usr/local/bin/muxshed-api
+Restart=on-failure
+RestartSec=5
+# Web UI + API. 8080 is taken by the closeli camera relay on this box.
+Environment=MUXSHED_LISTEN_ADDR=0.0.0.0:8090
+Environment=MUXSHED_RTMP_PORT=1935
+Environment=MUXSHED_DB_PATH=/var/lib/muxshed/muxshed.db
+Environment=MUXSHED_DATA_DIR=/var/lib/muxshed/data
+Environment=MUXSHED_WEB_DIR=/usr/local/share/muxshed/web
+Environment=MUXSHED_LOG_LEVEL=info
+# Browser sources: cap headless Chrome so it fits the box (787 MB RAM).
+# Without these, Chrome renders at the full output canvas at full fps.
+Environment=MUXSHED_BROWSER_MAX_WIDTH=960
+Environment=MUXSHED_BROWSER_MAX_HEIGHT=540
+Environment=MUXSHED_BROWSER_MAX_FPS=10
+# Keep the box responsive: the API is light, ffmpeg does the heavy lifting.
+Nice=0
+
+[Install]
+WantedBy=multi-user.target

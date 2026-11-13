@@ -2,7 +2,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
-	import { sources } from '$lib/stores/pipeline';
+	import { sources, scenes } from '$lib/stores/pipeline';
 	import SourceCard from '../../../components/SourceCard.svelte';
 	import { notify } from '$lib/notify';
 	import type { SourceKind } from '$lib/types';
@@ -12,8 +12,14 @@
 	let srtPassphrase = $state('');
 	let browserUrl = $state('');
 	let creating = $state(false);
+	let canvas = $state({ width: 1920, height: 1080 });
 
-	onMount(refresh);
+	onMount(async () => {
+		await refresh();
+		scenes.set(await api.listScenes());
+		const cfg = await api.getOutputConfig().catch(() => null);
+		if (cfg) canvas = { width: cfg.width, height: cfg.height };
+	});
 
 	async function refresh() {
 		sources.set(await api.listSources());
@@ -113,7 +119,7 @@
 			{:else}
 				<div class="grid gap-3 sm:grid-cols-2">
 					{#each $sources as source (source.id)}
-						<SourceCard {source} ondelete={refresh} />
+						<SourceCard {source} scenes={$scenes} {canvas} ondelete={refresh} />
 					{/each}
 				</div>
 			{/if}

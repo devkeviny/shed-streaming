@@ -55,6 +55,14 @@ pub struct Layer {
     pub opacity: f32,
     #[serde(default)]
     pub fit: LayerFit,
+    /// Hidden layers are skipped by the compositor but kept in the scene.
+    /// Defaults to true so layers created before this field existed stay visible.
+    #[serde(default = "default_true")]
+    pub visible: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// How a source fills its layer box.

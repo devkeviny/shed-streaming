@@ -29,6 +29,8 @@
 		width: 1920,
 		height: 1080,
 		fps: 30,
+		video_encoder: 'libx264',
+		egress_copy_video: false,
 	});
 	let resSelect = $state('1080p');
 	const RES_PRESETS = [
@@ -60,6 +62,8 @@
 		width: 1920,
 		height: 1080,
 		fps: 30,
+		video_encoder: 'libx264',
+		egress_copy_video: false,
 	});
 	let outputStats = $state<OutputStats>({
 		bytes_sent: 0,
@@ -668,6 +672,19 @@
 											{scene.id === programSourceId ? '● LIVE' : `${scene.layers.length} layer${scene.layers.length !== 1 ? 's' : ''}`}
 										</span>
 									</div>
+									<!-- Mini layout diagram: layer boxes at their canvas positions (no video — a live thumbnail would need a second compositor ffmpeg per scene). -->
+									<div class="relative mb-2 aspect-video w-full overflow-hidden rounded-sm border border-border-dim bg-black">
+										{#each [...scene.layers].sort((a, b) => a.z_index - b.z_index) as l (l.id)}
+											<div
+												class="absolute border {l.visible === false ? 'border-dashed border-amber-muted opacity-40' : 'border-amber-dim bg-amber/10'}"
+												style="left:{(l.position.x / outputConfig.width) * 100}%;top:{(l.position.y / outputConfig.height) * 100}%;width:{(l.size.width / outputConfig.width) * 100}%;height:{(l.size.height / outputConfig.height) * 100}%"
+												title="{l.visible === false ? '(hidden) ' : ''}{l.size.width}×{l.size.height} @ {l.position.x},{l.position.y}"
+											></div>
+										{/each}
+										{#if scene.layers.length === 0}
+											<div class="absolute inset-0 flex items-center justify-center text-[10px] text-amber-muted">Empty scene</div>
+										{/if}
+									</div>
 									<button
 										onclick={() => takeScene(scene.id)}
 										disabled={scene.id === programSourceId}
@@ -772,6 +789,23 @@
 					{#each [96, 128, 160, 192, 256] as a}<option value={a}>{a} kbps</option>{/each}
 				</select>
 			</div>
+			<div>
+				<label class="field-label" for="oc-enc">Video encoder</label>
+				<select id="oc-enc" bind:value={draft.video_encoder} class="select w-full">
+					<option value="libx264">libx264 (software)</option>
+					<option value="h264_v4l2m2m">h264_v4l2m2m (hardware, V4L2)</option>
+				</select>
+				<p class="mt-1 text-[11px] text-amber-muted">
+					Use the hardware encoder on boxes with a V4L2 H.264 encoder (e.g. Amlogic S905W) — software x264 can't reach realtime at 1080p there.
+				</p>
+			</div>
+			<label class="flex items-start gap-2 text-[12px] text-amber-dim">
+				<input type="checkbox" bind:checked={draft.egress_copy_video} class="mt-0.5" />
+				<span>
+					Pass program video through to RTMP without re-encoding
+					<span class="block text-[11px] text-amber-muted">Saves one full encode per destination. Only correct when the program comes from a scene (the compositor already outputs H.264 at this canvas).</span>
+				</span>
+			</label>
 			<div class="flex gap-2 pt-1">
 				<button onclick={saveOutput} class="btn btn--go">Save</button>
 				<button onclick={() => (showOutput = false)} class="btn btn--ghost">Cancel</button>

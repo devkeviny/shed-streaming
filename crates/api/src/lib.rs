@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod channel_hls;
+pub mod encoder;
 pub mod openapi;
 pub mod egress;
 pub mod failover;

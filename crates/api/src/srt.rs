@@ -41,27 +41,28 @@ pub async fn start_srt_listener(
         }
     }
 
-    let args = vec![
-        "-hide_banner",
-        "-loglevel", "warning",
-        "-i", &srt_url,
-        "-vf", &vf,
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-tune", "zerolatency",
-        "-b:v", &bv,
-        "-maxrate", &maxrate,
-        "-bufsize", &bufsize,
-        "-g", &gop,
-        "-r", &fps,
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", &ba,
-        "-ar", "48000",
-        "-f", "flv",
-        "-flvflags", "no_duration_filesize",
-        "pipe:1",
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(), "warning".into(),
+        "-i".into(), srt_url,
+        "-vf".into(), vf,
     ];
+    // Encoder from the output config (libx264 upstream default,
+    // h264_v4l2m2m on SoCs with a V4L2 hardware encoder).
+    crate::encoder::push_encoder_args(&mut args, cfg.video_encoder, "veryfast");
+    args.extend([
+        "-b:v".into(), bv,
+        "-maxrate".into(), maxrate,
+        "-bufsize".into(), bufsize,
+        "-g".into(), gop,
+        "-r".into(), fps,
+        "-c:a".into(), "aac".into(),
+        "-b:a".into(), ba,
+        "-ar".into(), "48000".into(),
+        "-f".into(), "flv".into(),
+        "-flvflags".into(), "no_duration_filesize".into(),
+        "pipe:1".into(),
+    ]);
 
     tracing::info!(
         "starting SRT listener for source {} on port {} ({}x{}@{}fps)",

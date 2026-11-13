@@ -8,6 +8,19 @@ use std::sync::Arc;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+/// Video encoder used by every ffmpeg call site (scene compositor, egress,
+/// source normalizer, SRT/WebRTC ingest, channel HLS, media player, browser
+/// sources). `libx264` is the upstream default; `h264_v4l2m2m` is the
+/// hardware encoder on SoCs with a V4L2 mem2mem H.264 encoder (e.g. Amlogic
+/// S905W), where libx264 cannot reach realtime at 1080p.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoEncoder {
+    #[default]
+    Libx264,
+    H264V4l2m2m,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct OutputConfig {
     pub video_bitrate_kbps: u32,
@@ -15,6 +28,16 @@ pub struct OutputConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// Video encoder for all ffmpeg call sites. `#[serde(default)]` keeps
+    /// configs saved before this field existed deserializing fine.
+    #[serde(default)]
+    pub video_encoder: VideoEncoder,
+    /// Egress (RTMP destinations) passes the program video through without
+    /// re-encoding. Only correct when the program is already H.264 at the
+    /// output canvas — i.e. it comes from the scene compositor. Saves one
+    /// full encode per destination (audio is still transcoded to AAC).
+    #[serde(default)]
+    pub egress_copy_video: bool,
 }
 
 impl Default for OutputConfig {
@@ -25,6 +48,8 @@ impl Default for OutputConfig {
             width: 1920,
             height: 1080,
             fps: 30,
+            video_encoder: VideoEncoder::Libx264,
+            egress_copy_video: false,
         }
     }
 }

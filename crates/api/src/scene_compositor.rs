@@ -13,7 +13,9 @@
 
 use bytes::Bytes;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::process::Command;
@@ -23,6 +25,14 @@ use uuid::Uuid;
 use crate::routes::output::OutputConfig;
 use crate::state::AppState;
 use muxshed_common::LayerFit;
+
+/// Shared state between a scene compositor's ffmpeg reader and its watchdog.
+struct CompositorWatch {
+    /// When the last video tag was read from the compositor's stdout.
+    last_frame: std::sync::Mutex<std::time::Instant>,
+    /// Consecutive watchdog restarts for this activation.
+    restarts: AtomicU32,
+}
 
 struct CompLayer {
     source_id: Uuid,
@@ -88,12 +98,31 @@ fn build_filter_graph(layers: &[CompLayer], width: u32, height: u32, fps: u32) -
 
 /// Start (or restart) the compositor for a scene and publish to its media relay.
 /// Only layers whose source is currently live are included.
+/// Spawns a watchdog that restarts the compositor's ffmpeg if it stalls or
+/// exits while the scene is on program (see [`compositor_watchdog`]).
 pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Result<(), String> {
+    let watch = Arc::new(CompositorWatch {
+        last_frame: std::sync::Mutex::new(std::time::Instant::now()),
+        restarts: AtomicU32::new(0),
+    });
+    start_scene_compositor_inner(state.clone(), scene_id, watch.clone()).await?;
+    let wd_state = state.clone();
+    tokio::spawn(async move {
+        compositor_watchdog(wd_state, scene_id, watch).await;
+    });
+    Ok(())
+}
+
+async fn start_scene_compositor_inner(
+    state: Arc<AppState>,
+    scene_id: Uuid,
+    watch: Arc<CompositorWatch>,
+) -> Result<(), String> {
     stop_scene_compositor(&state, &scene_id).await;
 
     let rows = sqlx::query_as::<_, (String, i64, i64, i64, i64, i64, f64, String)>(
         "SELECT source_id, x, y, width, height, z_index, opacity, fit \
-         FROM scene_layers WHERE scene_id = ? ORDER BY z_index ASC",
+         FROM scene_layers WHERE scene_id = ? AND visible != 0 ORDER BY z_index ASC",
     )
     .bind(scene_id.to_string())
     .fetch_all(&state.db)
@@ -199,9 +228,13 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
     let gop = format!("{}", cfg.fps * 2);
     let fps = format!("{}", cfg.fps);
     let ba = format!("{}k", cfg.audio_bitrate_kbps);
+    // Encoder from the output config (libx264 upstream default, h264_v4l2m2m
+    // on SoCs with a V4L2 hardware encoder). Decoding stays software:
+    // HW decode + HW encode in one ffmpeg process wedges this hardware.
+    crate::encoder::push_encoder_args(&mut args, cfg.video_encoder, "veryfast");
     for a in [
-        "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-b:v", &bv, "-maxrate",
-        &bv, "-bufsize", &bufsize, "-g", &gop, "-r", &fps, "-pix_fmt", "yuv420p", "-c:a", "aac",
+        "-b:v", &bv, "-maxrate",
+        &bv, "-bufsize", &bufsize, "-g", &gop, "-r", &fps, "-c:a", "aac",
         "-b:a", &ba, "-ar", "48000", "-f", "flv", "-flvflags", "no_duration_filesize", "pipe:1",
     ] {
         args.push(a.to_string());
@@ -257,10 +290,110 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
     // Read the composited output and publish it to the scene's relay.
     let st = state.clone();
     tokio::spawn(async move {
-        read_composited_output(scene_id, stdout, public_tx, st).await;
+        read_composited_output(scene_id, stdout, public_tx, st, watch).await;
     });
 
     Ok(())
+}
+
+/// Watchdog for a scene compositor's ffmpeg process.
+///
+/// On SoCs with a V4L2 hardware encoder the encoder can wedge at startup:
+/// the firmware stalls in the first frames (about 20-40% of starts on the
+/// Amlogic S905W) and ffmpeg stays alive but produces no frames. No in-process
+/// recovery works — the only reliable fix is a fresh ffmpeg process, which is
+/// what this watchdog does: if no video frame arrives for a while after the
+/// grace period, or the process exits while the scene is still on program,
+/// the compositor is restarted (up to a cap, then it gives up and the program
+/// stays black rather than restart-looping forever).
+async fn compositor_watchdog(state: Arc<AppState>, scene_id: Uuid, watch: Arc<CompositorWatch>) {
+    // Grace period: the compositor needs time to open its TCP inputs and
+    // prime the first frames before any frame is expected.
+    const GRACE: Duration = Duration::from_secs(10);
+    // No video frame for this long after the grace period = wedged encoder.
+    const STALL: Duration = Duration::from_secs(6);
+    const MAX_RESTARTS: u32 = 5;
+    let started = std::time::Instant::now();
+    let mut absent_polls: u32 = 0;
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Scene no longer on program (cut away / stopped) — nothing to watch.
+        if *state.program_intent.borrow() != Some(scene_id) {
+            return;
+        }
+        let running = state.scene_compositors.read().await.contains_key(&scene_id);
+        if !running {
+            // Confirm over two polls: `stop_all_compositors` removes the key
+            // a moment before `program_intent` moves, and a restart's
+            // stop-then-start also leaves a brief gap.
+            absent_polls += 1;
+            if absent_polls < 2 {
+                continue;
+            }
+        } else {
+            absent_polls = 0;
+        }
+        let last = *watch.last_frame.lock().unwrap();
+        let stalled = running && started.elapsed() > GRACE && last.elapsed() > STALL;
+        if running && !stalled {
+            // Healthy again — clear the failure streak so a later transient
+            // outage gets a fresh restart budget.
+            if watch.restarts.load(Ordering::SeqCst) > 0 {
+                watch.restarts.store(0, Ordering::SeqCst);
+            }
+            continue;
+        }
+        let n = watch.restarts.fetch_add(1, Ordering::SeqCst) + 1;
+        if n > MAX_RESTARTS {
+            tracing::error!(
+                "compositor watchdog: scene {} failed {} times, giving up (program is black)",
+                scene_id, MAX_RESTARTS
+            );
+            return;
+        }
+        if stalled {
+            tracing::warn!(
+                "compositor watchdog: scene {} stalled (no frame for {:?}), restarting ffmpeg (attempt {}/{})",
+                scene_id,
+                last.elapsed(),
+                n,
+                MAX_RESTARTS
+            );
+        } else {
+            tracing::warn!(
+                "compositor watchdog: scene {} ffmpeg exited, restarting (attempt {}/{})",
+                scene_id, n, MAX_RESTARTS
+            );
+        }
+        *watch.last_frame.lock().unwrap() = std::time::Instant::now();
+        absent_polls = 0;
+        match start_scene_compositor_inner(state.clone(), scene_id, watch.clone()).await {
+            Ok(()) => {
+                // Nudge program intent so the router re-subscribes: the old
+                // relay closed with the dead compositor, and the router only
+                // re-enters its outer loop on a program change (a same-value
+                // send still notifies the watch channel).
+                let _ = state.program_intent.send(Some(scene_id));
+            }
+            Err(e) if e == "scene has no live layers" => {
+                // The sources are offline — not a compositor failure. Don't
+                // burn the restart budget; keep waiting for them to return.
+                watch.restarts.fetch_sub(1, Ordering::SeqCst);
+                tracing::debug!(
+                    "compositor watchdog: scene {} has no live layers yet, waiting",
+                    scene_id
+                );
+            }
+            Err(e) => {
+                // Keep watching: the failure may be transient. The restart
+                // cap still bounds total attempts.
+                tracing::warn!(
+                    "compositor watchdog: restart failed for {}: {} (attempt {}/{})",
+                    scene_id, e, n, MAX_RESTARTS
+                );
+            }
+        }
+    }
 }
 
 /// Accept ffmpeg's connection for one layer and stream the source's FLV to it,
@@ -314,6 +447,7 @@ async fn read_composited_output(
     mut stdout: tokio::process::ChildStdout,
     public_tx: broadcast::Sender<Bytes>,
     state: Arc<AppState>,
+    watch: Arc<CompositorWatch>,
 ) {
     let mut header = [0u8; 13];
     if stdout.read_exact(&mut header).await.is_err() {
@@ -348,6 +482,8 @@ async fn read_composited_output(
         let tag = Bytes::from(tag_buf);
 
         if tag_type == 9 && !data.is_empty() {
+            // Video frame out — the encoder is alive; arm the watchdog clock.
+            *watch.last_frame.lock().unwrap() = std::time::Instant::now();
             let avc_packet_type = if data.len() > 1 { data[1] } else { 255 };
             let frame_type = (data[0] >> 4) & 0x0F;
             if avc_packet_type == 0 {

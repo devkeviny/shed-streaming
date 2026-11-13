@@ -49,7 +49,24 @@ pub async fn start_browser_source(
     let cfg = load_output_config(&state).await;
     let port = pick_port().await?;
 
-    // Headless Chrome rendering the page at the output canvas size.
+    // Low-power cap: headless Chrome at the full output canvas (e.g. 1920x1080
+    // with 30 fps screenshots) is too heavy for small SoCs — Chrome alone eats
+    // 200-400 MB and the screenshot loop saturates the little cores. Cap the
+    // render size and screenshot rate via env vars; unset = upstream behavior
+    // (full canvas). The ffmpeg scale/pad + fps filter still brings the source
+    // up to the output canvas, so a capped browser source composites normally.
+    let cap = |name: &str| std::env::var(name).ok()?.parse::<u32>().ok().filter(|v| *v > 0);
+    let bw = cap("MUXSHED_BROWSER_MAX_WIDTH").map_or(cfg.width, |m| cfg.width.min(m));
+    let bh = cap("MUXSHED_BROWSER_MAX_HEIGHT").map_or(cfg.height, |m| cfg.height.min(m));
+    let bfps = cap("MUXSHED_BROWSER_MAX_FPS").map_or(cfg.fps, |m| cfg.fps.min(m));
+    if bw != cfg.width || bh != cfg.height || bfps != cfg.fps {
+        tracing::info!(
+            "browser source {}: capped to {}x{}@{}fps (canvas {}x{}@{}fps)",
+            source_id, bw, bh, bfps, cfg.width, cfg.height, cfg.fps
+        );
+    }
+
+    // Headless Chrome rendering the page at the (possibly capped) size.
     let mut chrome = Command::new(chrome_path())
         .args([
             "--headless=new",
@@ -60,7 +77,7 @@ pub async fn start_browser_source(
             "--autoplay-policy=no-user-gesture-required",
             "--disable-dev-shm-usage",
             &format!("--remote-debugging-port={}", port),
-            &format!("--window-size={},{}", cfg.width, cfg.height),
+            &format!("--window-size={},{}", bw, bh),
             &url,
         ])
         .stdout(Stdio::null())
@@ -87,17 +104,21 @@ pub async fn start_browser_source(
     let bv = format!("{}k", cfg.video_bitrate_kbps);
     let bufsize = format!("{}k", cfg.video_bitrate_kbps * 2);
     let gop = format!("{}", cfg.fps * 2);
-    let args = vec![
-        "-hide_banner", "-loglevel", "warning",
-        "-f", "image2pipe", "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
-        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-        "-vf", &vf,
-        "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
-        "-b:v", &bv, "-maxrate", &bv, "-bufsize", &bufsize,
-        "-g", &gop, "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
-        "-shortest", "-f", "flv", "-flvflags", "no_duration_filesize", "pipe:1",
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(), "-loglevel".into(), "warning".into(),
+        "-f".into(), "image2pipe".into(), "-use_wallclock_as_timestamps".into(), "1".into(), "-i".into(), "pipe:0".into(),
+        "-f".into(), "lavfi".into(), "-i".into(), "anullsrc=r=48000:cl=stereo".into(),
+        "-vf".into(), vf,
     ];
+    // Encoder from the output config (libx264 upstream default,
+    // h264_v4l2m2m on SoCs with a V4L2 hardware encoder).
+    crate::encoder::push_encoder_args(&mut args, cfg.video_encoder, "veryfast");
+    args.extend([
+        "-b:v".into(), bv.clone(), "-maxrate".into(), bv, "-bufsize".into(), bufsize,
+        "-g".into(), gop,
+        "-c:a".into(), "aac".into(), "-b:a".into(), "128k".into(), "-ar".into(), "48000".into(),
+        "-shortest".into(), "-f".into(), "flv".into(), "-flvflags".into(), "no_duration_filesize".into(), "pipe:1".into(),
+    ]);
 
     let mut ff = Command::new("ffmpeg")
         .args(&args)
@@ -125,7 +146,7 @@ pub async fn start_browser_source(
     // Drive screenshots into ffmpeg.
     let st = state.clone();
     tokio::spawn(async move {
-        screenshot_loop(ws_url, ff_stdin, cfg.fps, source_id, st).await;
+        screenshot_loop(ws_url, ff_stdin, bfps, source_id, st).await;
     });
 
     // Read the encoded output into the relay.

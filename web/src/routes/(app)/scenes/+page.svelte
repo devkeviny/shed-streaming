@@ -17,10 +17,25 @@
 	let canvasEl = $state<HTMLDivElement | null>(null);
 	let assets = $state<Asset[]>([]);
 
+	// Canvas size follows the output config (the editor used to assume 1080p).
+	let outW = $state(OUT_W);
+	let outH = $state(OUT_H);
+
+	// Scene presets for the create form.
+	type Preset = 'blank' | 'fullscreen' | 'pip' | 'split';
+	let preset = $state<Preset>('blank');
+	let presetSourceA = $state('');
+	let presetSourceB = $state('');
+
 	onMount(async () => {
 		await refresh();
 		sources.set(await api.listSources());
 		assets = await api.listAssets();
+		const cfg = await api.getOutputConfig().catch(() => null);
+		if (cfg) {
+			outW = cfg.width;
+			outH = cfg.height;
+		}
 	});
 
 	async function refresh() {
@@ -44,8 +59,38 @@
 		if (!name.trim()) return;
 		creating = true;
 		try {
-			const s = await api.createScene(name.trim());
+			// Resolve a media-library asset to a source id first (same as addLayer).
+			async function resolveSource(id: string): Promise<string> {
+				if (id.startsWith('asset:')) {
+					const src = await api.createSourceFromAsset(id.slice(6));
+					sources.set(await api.listSources());
+					return src.id;
+				}
+				return id;
+			}
+			let layers;
+			if (preset === 'fullscreen' && presetSourceA) {
+				layers = [
+					{ source_id: await resolveSource(presetSourceA), x: 0, y: 0, width: outW, height: outH, z_index: 0, opacity: 1 },
+				];
+			} else if (preset === 'pip' && presetSourceA && presetSourceB) {
+				const pw = Math.round(outW / 3);
+				const ph = Math.round(outH / 3);
+				layers = [
+					{ source_id: await resolveSource(presetSourceA), x: 0, y: 0, width: outW, height: outH, z_index: 0, opacity: 1 },
+					{ source_id: await resolveSource(presetSourceB), x: outW - pw - 24, y: outH - ph - 24, width: pw, height: ph, z_index: 1, opacity: 1 },
+				];
+			} else if (preset === 'split' && presetSourceA && presetSourceB) {
+				layers = [
+					{ source_id: await resolveSource(presetSourceA), x: 0, y: 0, width: Math.floor(outW / 2), height: outH, z_index: 0, opacity: 1 },
+					{ source_id: await resolveSource(presetSourceB), x: Math.ceil(outW / 2), y: 0, width: Math.floor(outW / 2), height: outH, z_index: 1, opacity: 1 },
+				];
+			}
+			const s = await api.createScene(name.trim(), layers);
 			name = '';
+			preset = 'blank';
+			presetSourceA = '';
+			presetSourceB = '';
 			await refresh();
 			editing = $scenes.find((x) => x.id === s.id) ?? null;
 			notify.success('Scene created');
@@ -53,6 +98,17 @@
 			notify.error(e);
 		} finally {
 			creating = false;
+		}
+	}
+
+	async function duplicate(id: string) {
+		try {
+			const s = await api.duplicateScene(id);
+			await refresh();
+			editing = $scenes.find((x) => x.id === s.id) ?? null;
+			notify.success('Scene duplicated');
+		} catch (e) {
+			notify.error(e);
 		}
 	}
 
@@ -84,8 +140,8 @@
 			const n = editing.layers.length;
 			const layer =
 				n === 0
-					? { source_id: sourceId, x: 0, y: 0, width: OUT_W, height: OUT_H, z_index: 0, opacity: 1 }
-					: { source_id: sourceId, x: 1180 - n * 30, y: 620 - n * 30, width: 640, height: 360, z_index: n, opacity: 1 };
+					? { source_id: sourceId, x: 0, y: 0, width: outW, height: outH, z_index: 0, opacity: 1 }
+					: { source_id: sourceId, x: Math.round(outW * 0.6), y: Math.round(outH * 0.57), width: Math.round(outW / 3), height: Math.round(outH / 3), z_index: n, opacity: 1 };
 			await api.addLayer(editing.id, layer);
 			addSourceId = '';
 			await refresh();
@@ -111,7 +167,8 @@
 				height: Math.round(l.size.height),
 				z_index: l.z_index,
 				opacity: l.opacity,
-				fit: l.fit
+				fit: l.fit,
+				visible: l.visible,
 			});
 		} catch (e) {
 			notify.error(e);
@@ -142,16 +199,16 @@
 	function onMove(e: PointerEvent) {
 		if (!drag || !editing || !canvasEl) return;
 		const rect = canvasEl.getBoundingClientRect();
-		const dx = ((e.clientX - drag.sx) / rect.width) * OUT_W;
-		const dy = ((e.clientY - drag.sy) / rect.height) * OUT_H;
+		const dx = ((e.clientX - drag.sx) / rect.width) * outW;
+		const dy = ((e.clientY - drag.sy) / rect.height) * outH;
 		const l = editing.layers.find((x) => x.id === drag!.id);
 		if (!l) return;
 		if (drag.mode === 'move') {
-			l.position.x = Math.max(0, Math.min(OUT_W - l.size.width, drag.ox + dx));
-			l.position.y = Math.max(0, Math.min(OUT_H - l.size.height, drag.oy + dy));
+			l.position.x = Math.max(0, Math.min(outW - l.size.width, drag.ox + dx));
+			l.position.y = Math.max(0, Math.min(outH - l.size.height, drag.oy + dy));
 		} else {
-			l.size.width = Math.max(80, Math.min(OUT_W - l.position.x, drag.ow + dx));
-			l.size.height = Math.max(45, Math.min(OUT_H - l.position.y, drag.oh + dy));
+			l.size.width = Math.max(80, Math.min(outW - l.position.x, drag.ow + dx));
+			l.size.height = Math.max(45, Math.min(outH - l.position.y, drag.oh + dy));
 		}
 	}
 
@@ -175,6 +232,11 @@
 		l.opacity = v;
 		await saveLayer(l);
 	}
+	async function toggleVisible(l: Layer) {
+		l.visible = !l.visible;
+		await saveLayer(l);
+		await refresh();
+	}
 </script>
 
 <div class="mx-auto flex max-w-6xl gap-4">
@@ -188,21 +250,53 @@
 						<label class="field-label" for="scene-name">Scene name</label>
 						<input id="scene-name" bind:value={name} placeholder="e.g. Intro" class="input" />
 					</div>
-					<button type="submit" disabled={creating || !name.trim()} class="btn w-full">
+					<div>
+						<label class="field-label" for="scene-preset">Layout preset</label>
+						<select id="scene-preset" bind:value={preset} class="select w-full">
+							<option value="blank">Blank scene</option>
+							<option value="fullscreen">Full screen (1 source)</option>
+							<option value="pip">Picture-in-picture (2 sources)</option>
+							<option value="split">Split screen (2 sources)</option>
+						</select>
+					</div>
+					{#if preset !== 'blank'}
+						<div>
+							<label class="field-label" for="preset-a">{preset === 'fullscreen' ? 'Source' : 'Main source'}</label>
+							<select id="preset-a" bind:value={presetSourceA} class="select w-full">
+								<option value="">Select source…</option>
+								{#each $sources as s}<option value={s.id}>{s.name}</option>{/each}
+								{#each assets as a}<option value="asset:{a.id}">🖼 {a.name}</option>{/each}
+							</select>
+						</div>
+					{/if}
+					{#if preset === 'pip' || preset === 'split'}
+						<div>
+							<label class="field-label" for="preset-b">{preset === 'pip' ? 'Corner source' : 'Second source'}</label>
+							<select id="preset-b" bind:value={presetSourceB} class="select w-full">
+								<option value="">Select source…</option>
+								{#each $sources as s}<option value={s.id}>{s.name}</option>{/each}
+								{#each assets as a}<option value="asset:{a.id}">🖼 {a.name}</option>{/each}
+							</select>
+						</div>
+					{/if}
+					<button type="submit" disabled={creating || !name.trim() || (preset !== 'blank' && !presetSourceA) || ((preset === 'pip' || preset === 'split') && !presetSourceB)} class="btn w-full">
 						{creating ? 'Creating…' : '+ Create Scene'}
 					</button>
 				</form>
 				<div class="border-t border-border-dim pt-2"></div>
 				{#each $scenes as scene (scene.id)}
-					<button
-						onclick={() => { editing = scene; selectedLayer = null; }}
-						class="rack-item w-full justify-between {editing?.id === scene.id ? 'rack-item--active' : ''}"
-					>
-						<span class="truncate">{scene.name}</span>
-						<span class="pill {activeId === scene.id ? 'pill--live' : 'pill--idle'} text-[9px]">
-							{activeId === scene.id ? '● LIVE' : scene.layers.length}
-						</span>
-					</button>
+					<div class="flex items-center gap-1">
+						<button
+							onclick={() => { editing = scene; selectedLayer = null; }}
+							class="rack-item flex-1 justify-between {editing?.id === scene.id ? 'rack-item--active' : ''}"
+						>
+							<span class="truncate">{scene.name}</span>
+							<span class="pill {activeId === scene.id ? 'pill--live' : 'pill--idle'} text-[9px]">
+								{activeId === scene.id ? '● LIVE' : scene.layers.length}
+							</span>
+						</button>
+						<button onclick={() => duplicate(scene.id)} class="btn btn--ghost shrink-0 px-2" title="Duplicate scene" aria-label="Duplicate scene">⧉</button>
+					</div>
 				{/each}
 			</div>
 		</section>
@@ -218,6 +312,7 @@
 					<span>▮ {editing.name}</span>
 					<div class="flex gap-2">
 						<button onclick={() => activate(editing!.id)} class="btn btn--go">● Take to Program</button>
+						<button onclick={() => duplicate(editing!.id)} class="btn">⧉ Duplicate</button>
 						<button onclick={() => del(editing!.id)} class="btn btn--danger">Delete</button>
 					</div>
 				</header>
@@ -233,11 +328,11 @@
 						{#each orderedLayers as l (l.id)}
 							<!-- svelte-ignore a11y_no_static_element_interactions -->
 							<div
-								class="layer {selectedLayer === l.id ? 'layer--sel' : ''}"
-								style="left:{(l.position.x / OUT_W) * 100}%;top:{(l.position.y / OUT_H) * 100}%;width:{(l.size.width / OUT_W) * 100}%;height:{(l.size.height / OUT_H) * 100}%;opacity:{l.opacity}"
+								class="layer {selectedLayer === l.id ? 'layer--sel' : ''} {l.visible === false ? 'layer--hidden' : ''}"
+								style="left:{(l.position.x / outW) * 100}%;top:{(l.position.y / outH) * 100}%;width:{(l.size.width / outW) * 100}%;height:{(l.size.height / outH) * 100}%;opacity:{l.visible === false ? 0.35 : l.opacity}"
 								onpointerdown={(e) => onDown(l, 'move', e)}
 							>
-								<span class="layer__label">{srcName(l.source_id)}</span>
+								<span class="layer__label">{srcName(l.source_id)}{l.visible === false ? ' (hidden)' : ''}</span>
 								<!-- svelte-ignore a11y_no_static_element_interactions -->
 								<div class="layer__resize" onpointerdown={(e) => onDown(l, 'resize', e)}></div>
 							</div>
@@ -273,6 +368,33 @@
 						</div>
 						<button onclick={addLayer} disabled={!addSourceId} class="btn">+ Add Layer</button>
 					</div>
+
+					<!-- Selected layer: exact geometry -->
+					{#if selected}
+						<div class="rounded-md border border-border-dim p-3">
+							<p class="mb-2 text-[11px] uppercase tracking-wide text-amber-muted">
+								Selected: {srcName(selected.source_id)}
+							</p>
+							<div class="grid grid-cols-4 gap-2">
+								<div>
+									<label class="field-label" for="geo-x">X</label>
+									<input id="geo-x" type="number" min="0" max={outW} bind:value={selected.position.x} onchange={() => saveLayer(selected!)} class="input" />
+								</div>
+								<div>
+									<label class="field-label" for="geo-y">Y</label>
+									<input id="geo-y" type="number" min="0" max={outH} bind:value={selected.position.y} onchange={() => saveLayer(selected!)} class="input" />
+								</div>
+								<div>
+									<label class="field-label" for="geo-w">Width</label>
+									<input id="geo-w" type="number" min="80" max={outW} bind:value={selected.size.width} onchange={() => saveLayer(selected!)} class="input" />
+								</div>
+								<div>
+									<label class="field-label" for="geo-h">Height</label>
+									<input id="geo-h" type="number" min="45" max={outH} bind:value={selected.size.height} onchange={() => saveLayer(selected!)} class="input" />
+								</div>
+							</div>
+						</div>
+					{/if}
 				</div>
 			</section>
 
@@ -293,6 +415,7 @@
 									</span>
 								</button>
 								<div class="flex items-center gap-1">
+									<button class="btn btn--ghost" onclick={() => toggleVisible(l)} title={l.visible === false ? 'Show layer' : 'Hide layer'} aria-label={l.visible === false ? 'Show layer' : 'Hide layer'}>{l.visible === false ? '👁‍🗨' : '👁'}</button>
 									<select
 										bind:value={l.fit}
 										onchange={() => saveLayer(l)}
@@ -334,6 +457,11 @@
 		border-color: var(--color-amber-bright);
 		box-shadow: 0 0 0 1px var(--color-amber-bright);
 		background: rgba(255, 176, 0, 0.12);
+	}
+	.layer--hidden {
+		border-style: dashed;
+		border-color: var(--color-amber-muted);
+		background: rgba(128, 128, 128, 0.08);
 	}
 	.layer__label {
 		position: absolute;

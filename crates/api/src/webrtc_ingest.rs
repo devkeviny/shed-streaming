@@ -497,32 +497,33 @@ async fn start_ffmpeg(
     let fps = format!("{}", cfg.fps);
     let ba = format!("{}k", cfg.audio_bitrate_kbps);
 
-    let args = vec![
-        "-hide_banner",
-        "-loglevel", "warning",
-        "-protocol_whitelist", "file,crypto,data,rtp,udp",
-        "-fflags", "+genpts",
-        "-analyzeduration", "10000000",
-        "-probesize", "10000000",
-        "-i", &sdp_arg,
-        "-vf", &vf,
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-tune", "zerolatency",
-        "-b:v", &bv,
-        "-maxrate", &maxrate,
-        "-bufsize", &bufsize,
-        "-g", &gop,
-        "-r", &fps,
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", &ba,
-        "-ar", "48000",
-        "-ac", "2",
-        "-f", "flv",
-        "-flvflags", "no_duration_filesize",
-        "pipe:1",
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(), "warning".into(),
+        "-protocol_whitelist".into(), "file,crypto,data,rtp,udp".into(),
+        "-fflags".into(), "+genpts".into(),
+        "-analyzeduration".into(), "10000000".into(),
+        "-probesize".into(), "10000000".into(),
+        "-i".into(), sdp_arg,
+        "-vf".into(), vf,
     ];
+    // Encoder from the output config (libx264 upstream default,
+    // h264_v4l2m2m on SoCs with a V4L2 hardware encoder).
+    crate::encoder::push_encoder_args(&mut args, cfg.video_encoder, "veryfast");
+    args.extend([
+        "-b:v".into(), bv,
+        "-maxrate".into(), maxrate,
+        "-bufsize".into(), bufsize,
+        "-g".into(), gop,
+        "-r".into(), fps,
+        "-c:a".into(), "aac".into(),
+        "-b:a".into(), ba,
+        "-ar".into(), "48000".into(),
+        "-ac".into(), "2".into(),
+        "-f".into(), "flv".into(),
+        "-flvflags".into(), "no_duration_filesize".into(),
+        "pipe:1".into(),
+    ]);
 
     tracing::info!(
         "starting ingest ffmpeg for {} ({:?}, video :{}, audio :{})",

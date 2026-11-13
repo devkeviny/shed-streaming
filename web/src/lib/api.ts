@@ -189,7 +189,7 @@ export const api = {
 
 	// Scenes
 	listScenes: () => request<Scene[]>('/scenes'),
-	createScene: (name: string, layers?: { source_id: string; x?: number; y?: number; width?: number; height?: number; z_index?: number; opacity?: number; fit?: LayerFit }[]) =>
+	createScene: (name: string, layers?: { source_id: string; x?: number; y?: number; width?: number; height?: number; z_index?: number; opacity?: number; fit?: LayerFit; visible?: boolean }[]) =>
 		request<Scene>('/scenes', {
 			method: 'POST',
 			body: JSON.stringify({ name, layers }),
@@ -201,13 +201,14 @@ export const api = {
 			body: JSON.stringify(data),
 		}),
 	deleteScene: (id: string) => request<void>(`/scenes/${id}`, { method: 'DELETE' }),
+	duplicateScene: (id: string) => request<Scene>(`/scenes/${id}/duplicate`, { method: 'POST' }),
 	activateScene: (id: string) => request<void>(`/scenes/${id}/activate`, { method: 'POST' }),
-	addLayer: (sceneId: string, layer: { source_id: string; x?: number; y?: number; width?: number; height?: number; z_index?: number; opacity?: number; fit?: LayerFit }) =>
+	addLayer: (sceneId: string, layer: { source_id: string; x?: number; y?: number; width?: number; height?: number; z_index?: number; opacity?: number; fit?: LayerFit; visible?: boolean }) =>
 		request<Layer>(`/scenes/${sceneId}/layers`, {
 			method: 'POST',
 			body: JSON.stringify(layer),
 		}),
-	updateLayer: (sceneId: string, layerId: string, data: { source_id?: string; x?: number; y?: number; width?: number; height?: number; z_index?: number; opacity?: number; fit?: LayerFit }) =>
+	updateLayer: (sceneId: string, layerId: string, data: { source_id?: string; x?: number; y?: number; width?: number; height?: number; z_index?: number; opacity?: number; fit?: LayerFit; visible?: boolean }) =>
 		request<Layer>(`/scenes/${sceneId}/layers/${layerId}`, {
 			method: 'PUT',
 			body: JSON.stringify(data),

@@ -4,6 +4,7 @@ use crate::rtmp::flv::{self, is_sequence_header, is_video_keyframe};
 use crate::state::AppState;
 use bytes::Bytes;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -119,7 +120,22 @@ pub async fn run_program_router(state: Arc<AppState>) {
         };
 
         let mut video_rx = video_tx.subscribe();
-        let mut audio_rx = audio_relay.map(|tx| tx.subscribe());
+        // Do NOT keep the sender clones: holding one keeps the broadcast
+        // channel open after the producer dies, so recv() would pend forever
+        // on a dead relay instead of returning Closed and letting the router
+        // re-subscribe to the restarted producer's fresh relay. The map entry
+        // and the producer's own clone are the only senders.
+        drop(video_tx);
+        let mut audio_rx = audio_relay.map(|tx| {
+            let rx = tx.subscribe();
+            drop(tx);
+            rx
+        });
+
+        // Retry timer for the audio relay: the audio source's relay is
+        // recreated on reconnect, and the old receiver closes with it.
+        let mut audio_retry = tokio::time::interval(Duration::from_secs(2));
+        audio_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let mut forwarded: u64 = 0;
         let mut got_keyframe = false;
@@ -262,6 +278,17 @@ pub async fn run_program_router(state: Arc<AppState>) {
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(_) => {
                             audio_rx = None;
+                        }
+                    }
+                }
+                // Re-subscribe to the audio relay after an outage: the audio
+                // source's relay is recreated on reconnect, and the old
+                // receiver was closed with it.
+                _ = audio_retry.tick() => {
+                    if audio_rx.is_none() && !same_source {
+                        if let Some(tx) = state.get_media_relay(&audio_source_id).await {
+                            audio_rx = Some(tx.subscribe());
+                            tracing::info!("program router: re-subscribed to audio source {}", audio_source_id);
                         }
                     }
                 }

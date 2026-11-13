@@ -63,6 +63,8 @@ export interface Layer {
 	z_index: number;
 	opacity: number;
 	fit: LayerFit;
+	/** Hidden layers are skipped by the compositor but kept in the scene. */
+	visible: boolean;
 }
 
 export interface Scene {
@@ -161,12 +163,20 @@ export interface AssetFolder {
 	created_at: string;
 }
 
+export type VideoEncoder = 'libx264' | 'h264_v4l2m2m';
+
 export interface OutputConfig {
 	video_bitrate_kbps: number;
 	audio_bitrate_kbps: number;
 	width: number;
 	height: number;
 	fps: number;
+	/** Video encoder for all ffmpeg call sites. `h264_v4l2m2m` is the
+	 * hardware encoder on SoCs with a V4L2 mem2mem H.264 encoder. */
+	video_encoder: VideoEncoder;
+	/** Egress passes program video through without re-encoding (only correct
+	 * when the program comes from the scene compositor). */
+	egress_copy_video: boolean;
 }
 
 export interface FailoverConfig {

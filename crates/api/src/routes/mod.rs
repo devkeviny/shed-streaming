@@ -82,6 +82,7 @@ pub fn build_router(
                 .delete(scenes::delete),
         )
         .route("/scenes/{id}/activate", post(scenes::activate))
+        .route("/scenes/{id}/duplicate", post(scenes::duplicate))
         .route("/scenes/{id}/layers", post(scenes::add_layer))
         .route(
             "/scenes/{scene_id}/layers/{layer_id}",

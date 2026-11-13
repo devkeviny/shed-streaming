@@ -1,10 +1,37 @@
 <!-- Licensed under the GNU Affero General Public License v3.0 — see LICENSE. -->
 <script lang="ts">
-	import type { Source } from '$lib/types';
+	import type { Source, Scene } from '$lib/types';
 	import { api } from '$lib/api';
+	import { notify } from '$lib/notify';
 
-	let { source, ondelete }: { source: Source; ondelete: () => void } = $props();
+	let { source, scenes, canvas, ondelete }: { source: Source; scenes: Scene[]; canvas: { width: number; height: number }; ondelete: () => void } = $props();
 	let copied = $state(false);
+	let addToSceneId = $state('');
+	let adding = $state(false);
+
+	async function addToScene() {
+		if (!addToSceneId) return;
+		adding = true;
+		try {
+			const scene = scenes.find((s) => s.id === addToSceneId);
+			const n = scene?.layers.length ?? 0;
+			await api.addLayer(addToSceneId, {
+				source_id: source.id,
+				x: 0,
+				y: 0,
+				width: canvas.width,
+				height: canvas.height,
+				z_index: n,
+				opacity: 1,
+			});
+			addToSceneId = '';
+			notify.success(`Added to ${scene?.name ?? 'scene'}`);
+		} catch (e) {
+			notify.error(e);
+		} finally {
+			adding = false;
+		}
+	}
 
 	function connectionUrl(): string {
 		const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
@@ -111,6 +138,19 @@
 		<div class="mt-2 flex gap-2">
 			<button onclick={remove} class="btn btn--danger">
 				Delete
+			</button>
+		</div>
+	{/if}
+	{#if scenes.length > 0}
+		<div class="mt-2 flex gap-2 border-t border-border-dim pt-2">
+			<select bind:value={addToSceneId} class="select flex-1" aria-label="Add to scene">
+				<option value="">Add to scene…</option>
+				{#each scenes as s}
+					<option value={s.id}>{s.name}</option>
+				{/each}
+			</select>
+			<button onclick={addToScene} disabled={!addToSceneId || adding} class="btn">
+				{adding ? 'Adding…' : '+ Add'}
 			</button>
 		</div>
 	{/if}

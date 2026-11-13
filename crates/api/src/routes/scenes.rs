@@ -32,6 +32,7 @@ pub struct CreateLayer {
     pub z_index: Option<u32>,
     pub opacity: Option<f32>,
     pub fit: Option<LayerFit>,
+    pub visible: Option<bool>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -44,6 +45,7 @@ pub struct UpdateLayer {
     pub z_index: Option<u32>,
     pub opacity: Option<f32>,
     pub fit: Option<LayerFit>,
+    pub visible: Option<bool>,
 }
 
 /// List all scenes.
@@ -206,6 +208,68 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Duplicate a scene with all its layers (new ids, name suffixed with " copy").
+#[utoipa::path(
+    post,
+    path = "/api/v1/scenes/{id}/duplicate",
+    tag = "scenes",
+    params(("id" = String, Path, description = "Scene id")),
+    responses(
+        (status = 201, description = "Duplicated scene", body = muxshed_common::Scene),
+        (status = 404, description = "Not found")
+    )
+)]
+pub async fn duplicate(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<Scene>), ApiError> {
+    let existing = sqlx::query_as::<_, SceneRow>("SELECT id, name FROM scenes WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| MuxshedError::NotFound(format!("scene {}", id)))?;
+
+    let layers = fetch_layers(&state.db, &id).await?;
+    let new_id = Uuid::new_v4();
+    let name = format!("{} copy", existing.name);
+
+    sqlx::query("INSERT INTO scenes (id, name) VALUES (?, ?)")
+        .bind(new_id.to_string())
+        .bind(&name)
+        .execute(&state.db)
+        .await?;
+
+    let mut new_layers = Vec::new();
+    for l in layers {
+        let layer = insert_layer(
+            &state.db,
+            &new_id.to_string(),
+            CreateLayer {
+                source_id: l.source_id,
+                x: Some(l.position.x),
+                y: Some(l.position.y),
+                width: Some(l.size.width),
+                height: Some(l.size.height),
+                z_index: Some(l.z_index),
+                opacity: Some(l.opacity),
+                fit: Some(l.fit),
+                visible: Some(l.visible),
+            },
+        )
+        .await?;
+        new_layers.push(layer);
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(Scene {
+            id: new_id,
+            name,
+            layers: new_layers,
+        }),
+    ))
+}
+
 /// Activate a scene (make it the live program).
 #[utoipa::path(
     post,
@@ -304,7 +368,7 @@ pub async fn update_layer(
     Json(body): Json<UpdateLayer>,
 ) -> Result<Json<Layer>, ApiError> {
     let existing = sqlx::query_as::<_, LayerRow>(
-        "SELECT id, scene_id, source_id, x, y, width, height, z_index, opacity, fit FROM scene_layers WHERE id = ? AND scene_id = ?",
+        "SELECT id, scene_id, source_id, x, y, width, height, z_index, opacity, fit, visible FROM scene_layers WHERE id = ? AND scene_id = ?",
     )
     .bind(&layer_id)
     .bind(&scene_id)
@@ -320,9 +384,10 @@ pub async fn update_layer(
     let z_index = body.z_index.map(|z| z as i32).unwrap_or(existing.z_index);
     let opacity = body.opacity.unwrap_or(existing.opacity);
     let fit = body.fit.unwrap_or_else(|| LayerFit::from_db(&existing.fit));
+    let visible = body.visible.unwrap_or(existing.visible != 0);
 
     sqlx::query(
-        "UPDATE scene_layers SET source_id = ?, x = ?, y = ?, width = ?, height = ?, z_index = ?, opacity = ?, fit = ? WHERE id = ?",
+        "UPDATE scene_layers SET source_id = ?, x = ?, y = ?, width = ?, height = ?, z_index = ?, opacity = ?, fit = ?, visible = ? WHERE id = ?",
     )
     .bind(&source_id)
     .bind(x)
@@ -332,6 +397,7 @@ pub async fn update_layer(
     .bind(z_index)
     .bind(opacity)
     .bind(fit.as_str())
+    .bind(visible as i32)
     .bind(&layer_id)
     .execute(&state.db)
     .await?;
@@ -348,6 +414,7 @@ pub async fn update_layer(
         z_index: z_index as u32,
         opacity,
         fit,
+        visible,
     }))
 }
 
@@ -396,9 +463,10 @@ async fn insert_layer(
     let z_index = cl.z_index.unwrap_or(0);
     let opacity = cl.opacity.unwrap_or(1.0);
     let fit = cl.fit.unwrap_or_default();
+    let visible = cl.visible.unwrap_or(true);
 
     sqlx::query(
-        "INSERT INTO scene_layers (id, scene_id, source_id, x, y, width, height, z_index, opacity, fit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO scene_layers (id, scene_id, source_id, x, y, width, height, z_index, opacity, fit, visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(layer_id.to_string())
     .bind(scene_id)
@@ -410,6 +478,7 @@ async fn insert_layer(
     .bind(z_index as i32)
     .bind(opacity)
     .bind(fit.as_str())
+    .bind(visible as i32)
     .execute(db)
     .await?;
 
@@ -421,12 +490,13 @@ async fn insert_layer(
         z_index,
         opacity,
         fit,
+        visible,
     })
 }
 
 async fn fetch_layers(db: &sqlx::SqlitePool, scene_id: &str) -> Result<Vec<Layer>, ApiError> {
     let rows = sqlx::query_as::<_, LayerRow>(
-        "SELECT id, scene_id, source_id, x, y, width, height, z_index, opacity, fit FROM scene_layers WHERE scene_id = ? ORDER BY z_index",
+        "SELECT id, scene_id, source_id, x, y, width, height, z_index, opacity, fit, visible FROM scene_layers WHERE scene_id = ? ORDER BY z_index",
     )
     .bind(scene_id)
     .fetch_all(db)
@@ -454,6 +524,7 @@ struct LayerRow {
     z_index: i32,
     opacity: f32,
     fit: String,
+    visible: i32,
 }
 
 impl LayerRow {
@@ -472,6 +543,7 @@ impl LayerRow {
             z_index: self.z_index as u32,
             opacity: self.opacity,
             fit: LayerFit::from_db(&self.fit),
+            visible: self.visible != 0,
         }
     }
 }
