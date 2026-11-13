@@ -108,9 +108,35 @@
 				? 'RTMP'
 				: source.kind.type === 'web_rtc'
 				? 'WHIP'
+				: source.kind.type === 'video_capture'
+				? 'Camera'
+				: source.kind.type === 'audio_input'
+				? 'Mic'
+				: source.kind.type === 'text'
+				? 'Text'
+				: source.kind.type === 'color'
+				? 'Color'
 				: source.kind.type}
 		</span>
 	</div>
+	{#if source.kind.type === 'video_capture'}
+		<div class="mt-2 text-xs text-amber-dim">
+			{source.kind.device} · {source.kind.width}×{source.kind.height}@{source.kind.fps}fps
+		</div>
+	{:else if source.kind.type === 'audio_input'}
+		<div class="mt-2 text-xs text-amber-dim">
+			{source.kind.device} · audio-only (select as program audio)
+		</div>
+	{:else if source.kind.type === 'text'}
+		<div class="mt-2 truncate text-xs text-amber-dim" title={source.kind.text}>
+			“{source.kind.text}” · {source.kind.width}×{source.kind.height}
+		</div>
+	{:else if source.kind.type === 'color'}
+		<div class="mt-2 flex items-center gap-2 text-xs text-amber-dim">
+			<span class="inline-block h-4 w-4 rounded-sm border border-border" style="background:{source.kind.color}"></span>
+			{source.kind.color} · {source.kind.width}×{source.kind.height}
+		</div>
+	{/if}
 	{#if source.kind.type === 'rtmp' || source.kind.type === 'srt' || source.kind.type === 'web_rtc'}
 		<div class="scanlines-well mt-2 break-all rounded-sm border border-border p-2 text-xs text-amber-dim">
 			{connectionUrl()}
@@ -141,7 +167,7 @@
 			</button>
 		</div>
 	{/if}
-	{#if scenes.length > 0}
+	{#if scenes.length > 0 && source.kind.type !== 'audio_input'}
 		<div class="mt-2 flex gap-2 border-t border-border-dim pt-2">
 			<select bind:value={addToSceneId} class="select flex-1" aria-label="Add to scene">
 				<option value="">Add to scene…</option>

@@ -141,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         whip_sessions: RwLock::new(std::collections::HashMap::new()),
         scene_compositors: RwLock::new(std::collections::HashMap::new()),
         browser_sources: RwLock::new(std::collections::HashMap::new()),
+        local_sources: RwLock::new(std::collections::HashMap::new()),
         program_tx,
         program_source: program_source_tx,
         program_intent: program_intent_tx,
@@ -194,6 +195,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let s = state.clone();
                         tokio::spawn(async move {
                             let _ = muxshed_api::browser_source::start_browser_source(s, id, url).await;
+                        });
+                    }
+                } else if matches!(
+                    kind,
+                    muxshed_common::SourceKind::VideoCapture { .. }
+                        | muxshed_common::SourceKind::AudioInput { .. }
+                        | muxshed_common::SourceKind::Text { .. }
+                        | muxshed_common::SourceKind::Color { .. }
+                ) {
+                    if let Ok(id) = id_str.parse::<uuid::Uuid>() {
+                        let s = state.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = muxshed_api::local_sources::start_local_source(
+                                s, id, &kind,
+                            )
+                            .await
+                            {
+                                tracing::warn!("failed to start local source for {}: {}", id, e);
+                            }
                         });
                     }
                 }

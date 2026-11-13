@@ -19,6 +19,7 @@ pub mod program;
 pub mod routes;
 pub mod rtmp;
 pub mod browser_source;
+pub mod local_sources;
 pub mod scene_compositor;
 pub mod schedule_time;
 pub mod scheduler;

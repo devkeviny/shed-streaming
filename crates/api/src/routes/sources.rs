@@ -104,6 +104,24 @@ pub async fn create(
         });
     }
 
+    // Local capture sources (V4L2 camera, ALSA audio, text, color) start
+    // their ffmpeg immediately, in the background.
+    if matches!(
+        &kind,
+        SourceKind::VideoCapture { .. }
+            | SourceKind::AudioInput { .. }
+            | SourceKind::Text { .. }
+            | SourceKind::Color { .. }
+    ) {
+        let st = state.clone();
+        let k = kind.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::local_sources::start_local_source(st, id, &k).await {
+                tracing::warn!("local source {} failed to start: {}", id, e);
+            }
+        });
+    }
+
     let source = Source {
         id,
         name: body.name,
@@ -180,6 +198,28 @@ pub async fn update(
         .execute(&state.db)
         .await?;
 
+    // Local capture sources restart on any update: stop the old ffmpeg and
+    // start the new kind (if it is a local kind). Other kinds are untouched
+    // by an update, as before.
+    if let Ok(uid) = id.parse::<Uuid>() {
+        crate::local_sources::stop_local_source(&state, &uid).await;
+        if matches!(
+            &kind,
+            SourceKind::VideoCapture { .. }
+                | SourceKind::AudioInput { .. }
+                | SourceKind::Text { .. }
+                | SourceKind::Color { .. }
+        ) {
+            let st = state.clone();
+            let k = kind.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::local_sources::start_local_source(st, uid, &k).await {
+                    tracing::warn!("local source {} failed to restart: {}", uid, e);
+                }
+            });
+        }
+    }
+
     let source = Source {
         id: existing.id.parse().unwrap_or_default(),
         name,
@@ -188,6 +228,28 @@ pub async fn update(
     };
 
     Ok(Json(source))
+}
+
+/// List V4L2 video devices on this host (for the camera dropdown).
+#[utoipa::path(
+    get,
+    path = "/api/v1/sources/devices/v4l2",
+    tag = "sources",
+    responses((status = 200, description = "V4L2 devices"))
+)]
+pub async fn list_v4l2_devices() -> Json<Vec<crate::local_sources::CaptureDevice>> {
+    Json(crate::local_sources::list_v4l2_devices())
+}
+
+/// List ALSA audio inputs on this host (for the microphone dropdown).
+#[utoipa::path(
+    get,
+    path = "/api/v1/sources/devices/alsa",
+    tag = "sources",
+    responses((status = 200, description = "ALSA devices"))
+)]
+pub async fn list_alsa_devices() -> Json<Vec<crate::local_sources::CaptureDevice>> {
+    Json(crate::local_sources::list_alsa_devices())
 }
 
 /// Delete a source.
@@ -220,6 +282,7 @@ pub async fn delete(
         crate::media_player::stop_media_playback(&state, &uid).await;
         crate::guest_webrtc::stop_guest_ingest(&state, &uid).await;
         crate::browser_source::stop_browser_source(&state, &uid).await;
+        crate::local_sources::stop_local_source(&state, &uid).await;
     }
 
     Ok(StatusCode::NO_CONTENT)

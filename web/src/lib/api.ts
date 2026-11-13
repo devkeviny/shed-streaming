@@ -99,6 +99,8 @@ export const api = {
 
 	// Sources
 	listSources: () => request<Source[]>('/sources'),
+	listV4l2Devices: () => request<import('./types').CaptureDevice[]>('/sources/devices/v4l2'),
+	listAlsaDevices: () => request<import('./types').CaptureDevice[]>('/sources/devices/alsa'),
 	createSource: (name: string, kind: SourceKind) =>
 		request<Source>('/sources', {
 			method: 'POST',

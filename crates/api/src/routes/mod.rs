@@ -67,6 +67,8 @@ pub fn build_router(
         // Sources
         .route("/sources", get(sources::list).post(sources::create))
         .route("/sources/from-asset", post(sources::create_from_asset))
+        .route("/sources/devices/v4l2", get(sources::list_v4l2_devices))
+        .route("/sources/devices/alsa", get(sources::list_alsa_devices))
         .route(
             "/sources/{id}",
             get(sources::get_one)

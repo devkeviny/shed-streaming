@@ -308,12 +308,15 @@ async fn start_scene_compositor_inner(
 /// stays black rather than restart-looping forever).
 async fn compositor_watchdog(state: Arc<AppState>, scene_id: Uuid, watch: Arc<CompositorWatch>) {
     // Grace period: the compositor needs time to open its TCP inputs and
-    // prime the first frames before any frame is expected.
+    // prime the first frames before any frame is expected. The clock resets
+    // on every restart: on a loaded box a multi-layer scene can need the
+    // full grace to produce its first frame, and killing a slow-but-healthy
+    // compositor is worse than a slightly slower wedge detection.
     const GRACE: Duration = Duration::from_secs(10);
     // No video frame for this long after the grace period = wedged encoder.
     const STALL: Duration = Duration::from_secs(6);
     const MAX_RESTARTS: u32 = 5;
-    let started = std::time::Instant::now();
+    let mut last_restart = std::time::Instant::now();
     let mut absent_polls: u32 = 0;
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -334,7 +337,7 @@ async fn compositor_watchdog(state: Arc<AppState>, scene_id: Uuid, watch: Arc<Co
             absent_polls = 0;
         }
         let last = *watch.last_frame.lock().unwrap();
-        let stalled = running && started.elapsed() > GRACE && last.elapsed() > STALL;
+        let stalled = running && last_restart.elapsed() > GRACE && last.elapsed() > STALL;
         if running && !stalled {
             // Healthy again — clear the failure streak so a later transient
             // outage gets a fresh restart budget.
@@ -393,6 +396,8 @@ async fn compositor_watchdog(state: Arc<AppState>, scene_id: Uuid, watch: Arc<Co
                 );
             }
         }
+        // The new compositor gets a fresh grace period to prime.
+        last_restart = std::time::Instant::now();
     }
 }
 

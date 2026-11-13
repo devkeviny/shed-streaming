@@ -14,7 +14,16 @@ export type SourceKind =
 	| { type: 'browser'; url: string }
 	| { type: 'web_rtc'; token: string }
 	| { type: 'test_pattern' }
-	| { type: 'media_file'; asset_id: string; file_path: string; loop_mode: string };
+	| { type: 'media_file'; asset_id: string; file_path: string; loop_mode: string }
+	| { type: 'video_capture'; device: string; width: number; height: number; fps: number }
+	| { type: 'audio_input'; device: string }
+	| { type: 'text'; text: string; font_size: number; font_color: string; bg_color: string; width: number; height: number }
+	| { type: 'color'; color: string; width: number; height: number };
+
+export interface CaptureDevice {
+	id: string;
+	name: string;
+}
 
 export type SourceState = 'disconnected' | 'connecting' | 'live' | { error: string };
 

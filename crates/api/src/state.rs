@@ -32,6 +32,9 @@ pub struct AppState {
     pub scene_compositors: RwLock<HashMap<Uuid, tokio::process::Child>>,
     /// Headless Chrome processes for browser sources
     pub browser_sources: RwLock<HashMap<Uuid, tokio::process::Child>>,
+    /// Local capture sources (V4L2 camera, ALSA audio, text, color) — one
+    /// ffmpeg per source, keyed by source id
+    pub local_sources: RwLock<HashMap<Uuid, tokio::process::Child>>,
     pub egress: EgressManager,
     /// Public Channel HLS output (ffmpeg) for the watch page
     pub channel_hls: ChannelHls,

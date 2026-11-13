@@ -27,6 +27,35 @@ pub enum SourceKind {
         loop_mode: String,
     },
     Browser { url: String },
+    /// OBS "Video Capture Device": a local V4L2 camera (USB webcam).
+    /// Captured with ffmpeg's v4l2 input (MJPEG) and hardware-encoded.
+    VideoCapture {
+        device: String,
+        width: u32,
+        height: u32,
+        fps: u32,
+    },
+    /// OBS "Audio Input Capture": a local ALSA input (microphone, line-in).
+    /// Audio-only: it cannot be a scene layer, but it can be selected as the
+    /// program audio source.
+    AudioInput { device: String },
+    /// OBS "Text (GDI+)": text rendered on a solid background via drawtext.
+    /// (H.264 has no alpha channel, so a transparent text layer is not
+    /// possible in this pipeline — the background color is the backdrop.)
+    Text {
+        text: String,
+        font_size: u32,
+        font_color: String,
+        bg_color: String,
+        width: u32,
+        height: u32,
+    },
+    /// OBS "Color Source": a solid color video signal.
+    Color {
+        color: String,
+        width: u32,
+        height: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema, PartialEq)]
