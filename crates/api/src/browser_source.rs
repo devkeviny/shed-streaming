@@ -67,6 +67,15 @@ pub async fn start_browser_source(
     }
 
     // Headless Chrome rendering the page at the (possibly capped) size.
+    // Each source gets its own profile directory: Chrome locks its profile,
+    // so two sources (or a manual Chrome) sharing the default profile would
+    // contend for the SingletonLock and one of them would die.
+    let profile_dir = state
+        .config
+        .read()
+        .await
+        .data_dir
+        .join(format!("chrome-{}", source_id));
     let mut chrome = Command::new(chrome_path())
         .args([
             "--headless=new",
@@ -76,6 +85,7 @@ pub async fn start_browser_source(
             "--mute-audio",
             "--autoplay-policy=no-user-gesture-required",
             "--disable-dev-shm-usage",
+            &format!("--user-data-dir={}", profile_dir.display()),
             &format!("--remote-debugging-port={}", port),
             &format!("--window-size={},{}", bw, bh),
             &url,
@@ -167,8 +177,12 @@ async fn pick_port() -> Result<u16, String> {
 }
 
 /// Poll the DevTools HTTP endpoint until the page target's WebSocket URL appears.
+///
+/// 30 s budget: a cold Chrome start on a small SoC (Amlogic S905W) takes
+/// 5-10 s even warm, longer on first run (profile creation) or under load.
+/// The old 5 s budget killed Chrome before DevTools ever came up.
 async fn wait_for_page_ws(port: u16) -> Result<String, String> {
-    for _ in 0..50 {
+    for _ in 0..300 {
         if let Ok(body) = http_get(&format!("127.0.0.1:{}", port), "/json").await {
             if let Ok(targets) = serde_json::from_str::<serde_json::Value>(&body) {
                 if let Some(arr) = targets.as_array() {
@@ -211,6 +225,11 @@ async fn screenshot_loop(
 
     let frame_interval = std::time::Duration::from_millis((1000 / fps.max(1)).max(20) as u64);
     let mut id: u64 = 2;
+    // Consecutive failed captures. A single failure must NOT kill the
+    // source: the first capture often fails while the page is still loading
+    // (slow SoC, heavy page). Only give up after several in a row — a truly
+    // dead Chrome fails the WS send immediately anyway.
+    let mut consecutive_failures: u32 = 0;
     loop {
         if state.browser_sources.read().await.get(&source_id).is_none() {
             break; // torn down
@@ -222,9 +241,17 @@ async fn screenshot_loop(
         if sink.send(Message::Text(req.into())).await.is_err() {
             break;
         }
-        // read until the matching response
+        // Read until the matching response, with a timeout: if Chrome dies,
+        // the WebSocket can stay half-open forever and this loop would hang
+        // with ffmpeg waiting on stdin. Breaking here drops ff_stdin, which
+        // ends the image2pipe input and lets ffmpeg exit (via -shortest).
         let mut data: Option<String> = None;
-        while let Some(Ok(msg)) = stream.next().await {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            let next = tokio::time::timeout_at(deadline, stream.next()).await;
+            let Some(Ok(msg)) = next.ok().flatten() else {
+                break;
+            };
             if let Message::Text(txt) = msg {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
                     if v.get("id").and_then(|x| x.as_u64()) == Some(id) {
@@ -240,6 +267,7 @@ async fn screenshot_loop(
         }
         id += 1;
         if let Some(b64) = data {
+            consecutive_failures = 0;
             use base64::Engine;
             if let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
                 if ff_stdin.write_all(&jpeg).await.is_err() {
@@ -247,7 +275,18 @@ async fn screenshot_loop(
                 }
             }
         } else {
-            break;
+            consecutive_failures += 1;
+            tracing::debug!(
+                "browser {}: screenshot failed ({}/5)",
+                source_id, consecutive_failures
+            );
+            if consecutive_failures >= 5 {
+                tracing::warn!(
+                    "browser {}: screenshots failing repeatedly, giving up",
+                    source_id
+                );
+                break;
+            }
         }
         tokio::time::sleep(frame_interval).await;
     }

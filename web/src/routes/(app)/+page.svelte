@@ -12,7 +12,7 @@
 		recordingState,
 		failover,
 	} from '$lib/stores/pipeline';
-	import type { StingerConfig, BroadcastConfig, OutputConfig, OutputStats, AudioRouting, Asset } from '$lib/types';
+	import type { BroadcastConfig, OutputConfig, OutputStats, AudioRouting, Layer } from '$lib/types';
 	import StatusIndicator from '../../components/StatusIndicator.svelte';
 	import VideoPreview from '../../components/VideoPreview.svelte';
 	import { popout } from '$lib/popout';
@@ -41,11 +41,8 @@
 		{ label: '480p', w: 854, h: 480 },
 	];
 
-	let stingers = $state<StingerConfig[]>([]);
-	let assets = $state<Asset[]>([]);
 	let programSourceId = $state<string | null>(null);
 	let previewSourceId = $state<string | null>(null);
-	let activeTab = $state<'sources' | 'scenes' | 'library'>('sources');
 	let audioRouting = $state<AudioRouting>({
 		active_audio_source: null,
 		channels: [],
@@ -84,14 +81,140 @@
 	let configDirty = $state(false);
 	let statsInterval: ReturnType<typeof setInterval> | null = null;
 
+	// OBS-style dock state: the selected scene drives the Sources panel,
+	// which lists that scene's layers (not the global source list).
+	let selectedSceneId = $state<string | null>(null);
+	let selectedLayerId = $state<string | null>(null);
+	let addSourceId = $state('');
+	let newSceneName = $state('');
+	let cutSourceId = $state('');
+
+	const selectedScene = $derived($scenes.find((s) => s.id === selectedSceneId) ?? null);
+	const orderedLayers = $derived(
+		selectedScene ? [...selectedScene.layers].sort((a, b) => a.z_index - b.z_index) : []
+	);
+	const selectedLayer = $derived(
+		selectedScene?.layers.find((l) => l.id === selectedLayerId) ?? null
+	);
+
+	function srcName(id: string): string {
+		return $sources.find((s) => s.id === id)?.name ?? id.slice(0, 8);
+	}
+
+	function srcKind(id: string): string {
+		return $sources.find((s) => s.id === id)?.kind.type ?? '';
+	}
+
+	async function refreshScenes() {
+		const list = await api.listScenes();
+		scenes.set(list);
+		if (selectedSceneId && !list.find((s) => s.id === selectedSceneId)) {
+			selectedSceneId = list[0]?.id ?? null;
+			selectedLayerId = null;
+		}
+	}
+
+	async function createSceneInline() {
+		if (!newSceneName.trim()) return;
+		try {
+			const s = await api.createScene(newSceneName.trim());
+			newSceneName = '';
+			await refreshScenes();
+			selectedSceneId = s.id;
+			notify.success('Scene created');
+		} catch (e) {
+			notify.error(e);
+		}
+	}
+
+	async function duplicateSceneFn(id: string) {
+		try {
+			const s = await api.duplicateScene(id);
+			await refreshScenes();
+			selectedSceneId = s.id;
+			notify.success('Scene duplicated');
+		} catch (e) {
+			notify.error(e);
+		}
+	}
+
+	async function deleteSceneFn(id: string) {
+		try {
+			await api.deleteScene(id);
+			if (selectedSceneId === id) {
+				selectedSceneId = null;
+				selectedLayerId = null;
+			}
+			await refreshScenes();
+		} catch (e) {
+			notify.error(e);
+		}
+	}
+
+	async function addLayerToSelected() {
+		if (!selectedScene || !addSourceId) return;
+		try {
+			const n = selectedScene.layers.length;
+			const layer =
+				n === 0
+					? { source_id: addSourceId, x: 0, y: 0, width: outputConfig.width, height: outputConfig.height, z_index: 0, opacity: 1 }
+					: { source_id: addSourceId, x: Math.round(outputConfig.width * 0.6), y: Math.round(outputConfig.height * 0.57), width: Math.round(outputConfig.width / 3), height: Math.round(outputConfig.height / 3), z_index: n, opacity: 1 };
+			const l = await api.addLayer(selectedScene.id, layer);
+			addSourceId = '';
+			await refreshScenes();
+			selectedLayerId = l.id;
+		} catch (e) {
+			notify.error(e);
+		}
+	}
+
+	async function removeLayerFn(layerId: string) {
+		if (!selectedScene) return;
+		try {
+			await api.deleteLayer(selectedScene.id, layerId);
+			if (selectedLayerId === layerId) selectedLayerId = null;
+			await refreshScenes();
+		} catch (e) {
+			notify.error(e);
+		}
+	}
+
+	async function saveLayerFn(l: Layer) {
+		if (!selectedScene) return;
+		try {
+			await api.updateLayer(selectedScene.id, l.id, {
+				x: Math.round(l.position.x),
+				y: Math.round(l.position.y),
+				width: Math.round(l.size.width),
+				height: Math.round(l.size.height),
+				z_index: l.z_index,
+				opacity: l.opacity,
+				fit: l.fit,
+				visible: l.visible,
+			});
+		} catch (e) {
+			notify.error(e);
+		}
+	}
+
+	async function toggleLayerVisible(l: Layer) {
+		l.visible = !l.visible;
+		await saveLayerFn(l);
+		await refreshScenes();
+	}
+
+	async function moveLayerZ(l: Layer, dir: 1 | -1) {
+		l.z_index = Math.max(0, l.z_index + dir);
+		await saveLayerFn(l);
+		await refreshScenes();
+	}
+
 	onMount(async () => {
-		const [srcList, destList, sceneList, stingerList, assetList, status, recStatus, savedConfig, outConfig] =
+		const [srcList, destList, sceneList, status, recStatus, savedConfig, outConfig] =
 			await Promise.all([
 				api.listSources(),
 				api.listDestinations(),
 				api.listScenes(),
-				api.listLibrary().catch(() => []),
-				api.listAssets().catch(() => []),
 				api.getStatus(),
 				api.recordingStatus().catch(() => ({ recording: false })),
 				api.getBroadcastConfig().catch(() => null),
@@ -100,12 +223,12 @@
 		sources.set(srcList);
 		destinations.set(destList);
 		scenes.set(sceneList);
-		stingers = stingerList;
-		assets = assetList;
 		pipelineState.set(status.pipeline);
 		recordingState.set(recStatus);
 		if (savedConfig) config = savedConfig;
 		if (outConfig) outputConfig = outConfig;
+		// Select the live scene, else the first scene.
+		selectedSceneId = status.pipeline.active_scene ?? sceneList[0]?.id ?? null;
 
 		audioRouting = await api.getAudioRouting().catch(() => audioRouting);
 		if (status.pipeline.state === 'live') {
@@ -166,10 +289,6 @@
 
 	function liveSources() {
 		return $sources.filter((s) => s.state === 'live');
-	}
-
-	function liveStreamSources() {
-		return $sources.filter((s) => s.state === 'live' && s.kind.type !== 'media_file');
 	}
 
 	async function cutToSource(id: string) {
@@ -331,27 +450,341 @@
 		</div>
 	</div>
 
-		<!-- ========== STUDIO ========== -->
+	<!-- Preview + Program monitors (Studio Mode: Preview left, Program right) -->
+	<div class="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+		<!-- Preview / Next Up (left) -->
+		<section class="panel">
+			<header class="panel__head">
+				<span class="flex items-center gap-2">
+					▮ PREVIEW
+					<PopoutButton section="preview" width={640} height={420} />
+				</span>
+				{#if previewSourceId}
+					<button onclick={pushPreviewToLive} class="btn btn--danger" style="min-height:24px;padding:2px 10px">
+						▸ Push to Live
+					</button>
+				{/if}
+			</header>
+			{#if previewSourceId}
+				{#key previewSourceId}
+					<VideoPreview sourceId={previewSourceId} />
+				{/key}
+			{:else}
+				<div class="scanlines-well flex aspect-video items-center justify-center border-t border-border">
+					<span class="text-amber-muted">Select a source below to queue</span>
+				</div>
+			{/if}
+		</section>
 
-		<!-- Master controls -->
-		<section class="panel mb-4">
+		<!-- Program / Live (right) -->
+		<section class="panel">
+			<header class="panel__head">
+				<span class="flex items-center gap-2 {$isLive ? 'text-danger-glow' : ''}">
+					▮ PROGRAM
+					<PopoutButton section="program" width={960} height={600} />
+				</span>
+				<div class="flex items-center gap-2">
+					{#if programSourceId}
+						{@const progSrc = $sources.find((s) => s.id === programSourceId)}
+						{@const progScene = $scenes.find((s) => s.id === programSourceId)}
+						<span class="text-amber-dim normal-case tracking-normal">{progScene?.name || progSrc?.name || ''}</span>
+					{/if}
+					<button
+						type="button"
+						class="btn {programMonitorAudio ? 'btn--go' : ''}"
+						style="min-height:24px;padding:2px 8px"
+						title="Local speaker monitor only — use headphones to avoid feedback. Does not change broadcast audio."
+						onclick={() => (programMonitorAudio = !programMonitorAudio)}
+					>
+						{programMonitorAudio ? '▮ Monitor Audio' : '▯ Monitor Audio'}
+					</button>
+				</div>
+			</header>
+			{#if programSourceId}
+				{#key programSourceId}
+					<VideoPreview
+						sourceId={programSourceId}
+						active={true}
+						monitorAudio={programMonitorAudio}
+					/>
+				{/key}
+				<p class="border-t border-border-dim px-3 py-1 text-[11px] text-amber-muted">
+					Monitor Audio is local to this browser only. Prefer headphones to avoid acoustic feedback.
+				</p>
+			{:else}
+				<div class="scanlines-well flex aspect-video items-center justify-center border-t border-border">
+					<span class="text-amber-muted">No source on live</span>
+				</div>
+			{/if}
+		</section>
+	</div>
+
+	<!-- ========== OBS DOCKS: Scenes | Sources | Audio Mixer | Controls ========== -->
+	<div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-12">
+		<!-- Scenes -->
+		<section class="panel xl:col-span-3">
+			<header class="panel__head">▮ SCENES</header>
+			<div class="panel__body space-y-2">
+				{#if $scenes.length === 0}
+					<p class="text-amber-muted">No scenes yet.</p>
+				{:else}
+					<div class="space-y-1">
+						{#each $scenes as scene (scene.id)}
+							<div
+								class="flex items-center gap-2 rounded-sm border px-2 py-1.5 {scene.id === selectedSceneId
+									? 'border-amber bg-panel-raised'
+									: scene.id === programSourceId
+										? 'border-danger bg-panel-raised'
+										: 'border-border-dim hover:border-border'}"
+							>
+								<button
+									onclick={() => { selectedSceneId = scene.id; selectedLayerId = null; }}
+									class="min-w-0 flex-1 truncate text-left text-amber"
+									title="Select scene to edit its sources"
+								>
+									{scene.name}
+								</button>
+								<span class="shrink-0 text-[10px] text-amber-muted">{scene.layers.length} layer{scene.layers.length !== 1 ? 's' : ''}</span>
+								{#if scene.id === programSourceId}
+									<span class="pill pill--live shrink-0">● LIVE</span>
+								{:else}
+									<button
+										onclick={() => takeScene(scene.id)}
+										class="btn btn--danger shrink-0"
+										style="min-height:22px;padding:1px 8px;font-size:11px"
+										title="Take this scene to Program"
+									>
+										Take
+									</button>
+								{/if}
+								<button
+									onclick={() => duplicateSceneFn(scene.id)}
+									class="btn btn--ghost shrink-0"
+									style="min-height:22px;padding:1px 6px;font-size:11px"
+									title="Duplicate scene"
+								>
+									⧉
+								</button>
+								<button
+									onclick={() => deleteSceneFn(scene.id)}
+									class="btn btn--danger shrink-0"
+									style="min-height:22px;padding:1px 6px;font-size:11px"
+									title="Delete scene"
+								>
+									✕
+								</button>
+							</div>
+						{/each}
+					</div>
+				{/if}
+				<form
+					onsubmit={(e) => { e.preventDefault(); createSceneInline(); }}
+					class="flex gap-2 border-t border-border-dim pt-2"
+				>
+					<input
+						bind:value={newSceneName}
+						placeholder="New scene name"
+						class="input flex-1"
+						aria-label="New scene name"
+					/>
+					<button type="submit" class="btn" disabled={!newSceneName.trim()}>+ Add</button>
+				</form>
+				<p class="text-[11px] text-amber-muted">
+					<a href="/scenes" class="text-amber hover:text-amber-bright">Canvas editor ▸</a>
+					<span class="mx-1">·</span>
+					<a href="/sources" class="text-amber hover:text-amber-bright">Manage sources ▸</a>
+				</p>
+			</div>
+		</section>
+
+		<!-- Sources (layers of the selected scene) -->
+		<section class="panel xl:col-span-4">
+			<header class="panel__head">
+				<span>▮ SOURCES{#if selectedScene} — {selectedScene.name}{/if}</span>
+			</header>
+			<div class="panel__body space-y-2">
+				{#if !selectedScene}
+					<p class="text-amber-muted">Select a scene to see its sources.</p>
+				{:else if orderedLayers.length === 0}
+					<p class="text-amber-muted">Empty scene — add a source below.</p>
+				{:else}
+					<div class="space-y-1">
+						{#each orderedLayers as l (l.id)}
+							<div
+								class="flex items-center gap-2 rounded-sm border px-2 py-1.5 {l.id === selectedLayerId
+									? 'border-amber bg-panel-raised'
+									: 'border-border-dim hover:border-border'} {l.visible === false ? 'opacity-50' : ''}"
+							>
+								<button
+									onclick={() => toggleLayerVisible(l)}
+									class="shrink-0 text-amber-dim hover:text-amber-bright"
+									title={l.visible === false ? 'Show layer' : 'Hide layer'}
+									aria-label={l.visible === false ? 'Show layer' : 'Hide layer'}
+								>
+									{l.visible === false ? '🚫' : '👁'}
+								</button>
+								<button
+									onclick={() => { selectedLayerId = l.id; }}
+									class="min-w-0 flex-1 truncate text-left text-amber"
+									title="Select layer to edit its position and size"
+								>
+									{srcName(l.source_id)}
+								</button>
+								<span class="shrink-0 text-[10px] uppercase tracking-wide text-amber-muted">{srcKind(l.source_id)}</span>
+								<button
+									onclick={() => moveLayerZ(l, 1)}
+									class="btn btn--ghost shrink-0"
+									style="min-height:22px;padding:1px 6px;font-size:11px"
+									title="Bring forward"
+								>
+									▲
+								</button>
+								<button
+									onclick={() => moveLayerZ(l, -1)}
+									class="btn btn--ghost shrink-0"
+									style="min-height:22px;padding:1px 6px;font-size:11px"
+									title="Send backward"
+								>
+									▼
+								</button>
+								<button
+									onclick={() => removeLayerFn(l.id)}
+									class="btn btn--danger shrink-0"
+									style="min-height:22px;padding:1px 6px;font-size:11px"
+									title="Remove layer from scene"
+								>
+									✕
+								</button>
+							</div>
+						{/each}
+					</div>
+				{/if}
+				{#if selectedScene}
+					<div class="flex gap-2 border-t border-border-dim pt-2">
+						<select bind:value={addSourceId} class="select flex-1" aria-label="Source to add">
+							<option value="">Add source to scene…</option>
+							{#each $sources as s}
+								<option value={s.id}>{s.name} ({s.kind.type})</option>
+							{/each}
+						</select>
+						<button onclick={addLayerToSelected} disabled={!addSourceId} class="btn">+ Add</button>
+					</div>
+				{/if}
+				{#if selectedLayer}
+					<div class="space-y-2 border-t border-border-dim pt-2">
+						<div class="label">Selected layer — {srcName(selectedLayer.source_id)}</div>
+						<div class="grid grid-cols-4 gap-2">
+							<div>
+								<label class="field-label" for="ly-x">X</label>
+								<input id="ly-x" type="number" bind:value={selectedLayer.position.x} onchange={() => saveLayerFn(selectedLayer!)} class="input" />
+							</div>
+							<div>
+								<label class="field-label" for="ly-y">Y</label>
+								<input id="ly-y" type="number" bind:value={selectedLayer.position.y} onchange={() => saveLayerFn(selectedLayer!)} class="input" />
+							</div>
+							<div>
+								<label class="field-label" for="ly-w">W</label>
+								<input id="ly-w" type="number" bind:value={selectedLayer.size.width} onchange={() => saveLayerFn(selectedLayer!)} class="input" />
+							</div>
+							<div>
+								<label class="field-label" for="ly-h">H</label>
+								<input id="ly-h" type="number" bind:value={selectedLayer.size.height} onchange={() => saveLayerFn(selectedLayer!)} class="input" />
+							</div>
+						</div>
+						<div class="flex items-center gap-2">
+							<label class="field-label" for="ly-op">Opacity</label>
+							<input
+								id="ly-op"
+								type="range"
+								min="0"
+								max="1"
+								step="0.05"
+								bind:value={selectedLayer.opacity}
+								onchange={() => saveLayerFn(selectedLayer!)}
+								class="flex-1"
+							/>
+							<span class="w-10 text-right text-amber">{Math.round(selectedLayer.opacity * 100)}%</span>
+						</div>
+					</div>
+				{/if}
+			</div>
+		</section>
+
+		<!-- Audio Mixer -->
+		<section class="panel xl:col-span-2">
+			<header class="panel__head">
+				<span class="flex items-center gap-2">
+					▮ AUDIO MIXER
+					<PopoutButton section="audio" width={400} height={500} />
+				</span>
+			</header>
+			<div class="panel__body space-y-2">
+				<button
+					onclick={async () => {
+						try {
+							await api.toggleAudioFollowsVideo();
+							audioRouting.audio_follows_video = !audioRouting.audio_follows_video;
+							if (audioRouting.audio_follows_video) audioRouting.active_audio_source = null;
+						} catch (e) { notify.error(e); }
+					}}
+					class="btn w-full {audioRouting.audio_follows_video ? 'btn--go' : ''}"
+				>
+					{audioRouting.audio_follows_video ? 'Follows Video' : 'Independent'}
+				</button>
+				{#if liveSources().length === 0}
+					<p class="text-amber-muted">No live sources.</p>
+				{:else}
+					<div class="space-y-1">
+						{#each liveSources() as source (source.id)}
+							{@const isAudioSource = audioRouting.audio_follows_video
+								? source.id === programSourceId
+								: source.id === audioRouting.active_audio_source}
+							<button
+								onclick={() => setAudioSource(source.id)}
+								disabled={audioRouting.audio_follows_video}
+								class="row w-full text-left {isAudioSource ? 'border-live' : ''} disabled:cursor-default"
+							>
+								<div class="min-w-0 flex-1">
+									<div class="truncate {isAudioSource ? 'text-amber-bright' : 'text-amber-dim'}">
+										{source.name}
+									</div>
+								</div>
+								{#if isAudioSource}
+									<span class="pill pill--live shrink-0">● ACTIVE</span>
+								{/if}
+							</button>
+						{/each}
+					</div>
+				{/if}
+				<p class="text-[11px] text-amber-muted">
+					{#if audioRouting.audio_follows_video}
+						Audio follows the video on Program.
+					{:else if audioRouting.active_audio_source}
+						{@const audioSrc = $sources.find((s) => s.id === audioRouting.active_audio_source)}
+						Audio: {audioSrc?.name || 'Unknown'}
+					{:else}
+						No audio source selected.
+					{/if}
+				</p>
+			</div>
+		</section>
+
+		<!-- Controls -->
+		<section class="panel xl:col-span-3">
 			<header class="panel__head">▮ CONTROLS</header>
-			<div class="panel__body flex flex-wrap items-center gap-3">
+			<div class="panel__body space-y-3">
 				{#if $isLive}
 					<button
 						onclick={async () => { try { await api.stopStream(); } catch(e) { notify.error(e); }}}
-						class="btn btn--danger"
+						class="btn btn--danger w-full"
 					>
 						■ End Stream
 					</button>
-					<button
-						onclick={toggleRecording}
-						class="btn {$isRecording ? 'btn--danger' : ''}"
-					>
+					<button onclick={toggleRecording} class="btn w-full {$isRecording ? 'btn--danger' : ''}">
 						{$isRecording ? '● Stop Rec' : '● Record'}
 					</button>
 					{#if $pipelineState.state === 'live'}
-						<span class="pill pill--live ml-auto">● ON AIR — since {new Date($pipelineState.started_at).toLocaleTimeString()}</span>
+						<span class="pill pill--live">● ON AIR — since {new Date($pipelineState.started_at).toLocaleTimeString()}</span>
 					{/if}
 				{:else}
 					<button
@@ -363,97 +796,36 @@
 								notify.error(e);
 							}
 						}}
-						class="btn btn--go"
+						class="btn btn--go w-full"
 					>
 						● Go Live
 					</button>
-					<span class="pill pill--idle ml-auto">○ OFF AIR</span>
+					<span class="pill pill--idle">○ OFF AIR</span>
 				{/if}
-			</div>
-		</section>
 
-		<!-- Preview + Program monitors -->
-		<div class="mb-4 grid grid-cols-2 gap-4">
-			<!-- Preview / Next Up (left) -->
-			<section class="panel">
-				<header class="panel__head">
-					<span class="flex items-center gap-2">
-						▮ PREVIEW
-						<PopoutButton section="preview" width={640} height={420} />
-					</span>
-					{#if previewSourceId}
-						<button onclick={pushPreviewToLive} class="btn btn--danger" style="min-height:24px;padding:2px 10px">
-							▸ Push to Live
-						</button>
-					{/if}
-				</header>
-				{#if previewSourceId}
-					{#key previewSourceId}
-						<VideoPreview sourceId={previewSourceId} />
-					{/key}
-				{:else}
-					<div class="scanlines-well flex aspect-video items-center justify-center border-t border-border">
-						<span class="text-amber-muted">Select a source below to queue</span>
+				<div class="border-t border-border-dim pt-2">
+					<span class="label">Cut to source (no scene)</span>
+					<div class="mt-1 flex gap-2">
+						<select bind:value={cutSourceId} class="select flex-1" aria-label="Source to cut to">
+							<option value="">Raw source…</option>
+							{#each liveSources() as s}
+								<option value={s.id}>{s.name}</option>
+							{/each}
+						</select>
+						<button onclick={() => cutToSource(cutSourceId)} disabled={!cutSourceId} class="btn btn--danger">Cut</button>
 					</div>
-				{/if}
-			</section>
+				</div>
 
-			<!-- Program / Live (right) -->
-			<section class="panel">
-				<header class="panel__head">
-					<span class="flex items-center gap-2 {$isLive ? 'text-danger-glow' : ''}">
-						▮ PROGRAM
-						<PopoutButton section="program" width={960} height={600} />
-					</span>
-					<div class="flex items-center gap-2">
-						{#if programSourceId}
-							{@const progSrc = $sources.find((s) => s.id === programSourceId)}
-							<span class="text-amber-dim normal-case tracking-normal">{progSrc?.name || ''}</span>
-						{/if}
+				<div class="space-y-1 border-t border-border-dim pt-2">
+					<div class="flex items-center justify-between">
+						<span class="label">Output</span>
 						<button
-							type="button"
-							class="btn {programMonitorAudio ? 'btn--go' : ''}"
-							style="min-height:24px;padding:2px 8px"
-							title="Local speaker monitor only — use headphones to avoid feedback. Does not change broadcast audio."
-							onclick={() => (programMonitorAudio = !programMonitorAudio)}
+							onclick={openOutput}
+							class="btn btn--ghost"
+							style="min-height:20px;padding:1px 8px;font-size:11px"
+							aria-label="Edit output config">Edit</button
 						>
-							{programMonitorAudio ? '▮ Monitor Audio' : '▯ Monitor Audio'}
-						</button>
 					</div>
-				</header>
-				{#if programSourceId}
-					{#key programSourceId}
-						<VideoPreview
-							sourceId={programSourceId}
-							active={true}
-							monitorAudio={programMonitorAudio}
-						/>
-					{/key}
-					<p class="border-t border-border-dim px-3 py-1 text-[11px] text-amber-muted">
-						Monitor Audio is local to this browser only. Prefer headphones to avoid acoustic feedback.
-					</p>
-				{:else}
-					<div class="scanlines-well flex aspect-video items-center justify-center border-t border-border">
-						<span class="text-amber-muted">No source on live</span>
-					</div>
-				{/if}
-			</section>
-		</div>
-
-		<!-- Config + Stats side by side under previews -->
-		<div class="mb-4 grid grid-cols-2 gap-4">
-			<!-- Config (under Program) -->
-			<section class="panel">
-				<header class="panel__head flex items-center justify-between">
-					<span>▮ OUTPUT CONFIG</span>
-					<button
-						onclick={openOutput}
-						class="btn btn--ghost"
-						style="min-height:20px;padding:1px 8px;font-size:11px"
-						aria-label="Edit output config">Edit</button
-					>
-				</header>
-				<div class="panel__body space-y-1">
 					<div class="flex justify-between">
 						<span class="text-amber-dim">Resolution</span>
 						<span class="text-amber-bright">{outputConfig.width}x{outputConfig.height}@{outputConfig.fps}fps</span>
@@ -462,6 +834,12 @@
 						<span class="text-amber-dim">Video bitrate</span>
 						<span class="text-amber-bright">{outputConfig.video_bitrate_kbps} kbps</span>
 					</div>
+					{#if outputStats.source_encoder}
+						<div class="flex justify-between">
+							<span class="text-amber-dim">Encoder</span>
+							<span class="ml-2 truncate text-amber-dim">{outputStats.source_encoder}</span>
+						</div>
+					{/if}
 					{#if $destinations.length > 0}
 						<div class="mt-2 border-t border-border-dim pt-2">
 							<span class="label">Destinations</span>
@@ -487,35 +865,13 @@
 							<a href="/destinations" class="text-amber hover:text-amber-bright">Add one ▸</a>
 						</div>
 					{/if}
-					<div class="flex justify-between">
-						<span class="text-amber-dim">Audio</span>
-						<span class="text-amber">
-							{#if audioRouting.audio_follows_video}
-								Follows video
-							{:else if audioRouting.active_audio_source}
-								{@const audioSrc = $sources.find((s) => s.id === audioRouting.active_audio_source)}
-								{audioSrc?.name || 'Unknown'}
-							{:else}
-								None
-							{/if}
-						</span>
-					</div>
-					{#if outputStats.source_encoder}
-						<div class="flex justify-between">
-							<span class="text-amber-dim">Encoder</span>
-							<span class="ml-2 truncate text-amber-dim">{outputStats.source_encoder}</span>
-						</div>
-					{/if}
 					{#if configDirty}
 						<button onclick={saveConfig} class="btn mt-2 w-full">Save Config</button>
 					{/if}
 				</div>
-			</section>
 
-			<!-- Stats (under Next Up) -->
-			<section class="panel">
-				<header class="panel__head">▮ STREAM STATS</header>
-				<div class="panel__body space-y-1">
+				<div class="space-y-1 border-t border-border-dim pt-2">
+					<span class="label">Stream stats</span>
 					<div class="flex items-baseline justify-between">
 						<span class="text-amber-dim">Duration</span>
 						<span class="led text-[18px]">{formatDuration(outputStats.duration_secs)}</span>
@@ -532,216 +888,17 @@
 						</span>
 					</div>
 					<div class="flex items-baseline justify-between">
-						<span class="text-amber-dim">Source bitrate</span>
-						<span class="led text-[18px]">{outputStats.source_bitrate_kbps.toFixed(0)} kbps</span>
-					</div>
-					<div class="flex items-baseline justify-between">
 						<span class="text-amber-dim">Output bitrate</span>
 						<span class="led text-[18px]">{outputStats.output_bitrate_kbps} kbps</span>
 					</div>
+					<div class="flex justify-between">
+						<span class="text-amber-dim">Dropped frames</span>
+						<span class="text-amber-bright">{outputStats.dropped_frames}</span>
+					</div>
 				</div>
-			</section>
-		</div>
-
-		<!-- Audio Mixer -->
-		{#if liveSources().length > 0}
-			<section class="panel mb-4">
-				<header class="panel__head">
-					<span class="flex items-center gap-2">
-						▮ AUDIO
-						<PopoutButton section="audio" width={400} height={500} />
-					</span>
-					<button
-						onclick={async () => {
-							try {
-								await api.toggleAudioFollowsVideo();
-								audioRouting.audio_follows_video = !audioRouting.audio_follows_video;
-								if (audioRouting.audio_follows_video) audioRouting.active_audio_source = null;
-							} catch (e) { notify.error(e); }
-						}}
-						class="btn {audioRouting.audio_follows_video ? 'btn--go' : ''}"
-						style="min-height:24px;padding:2px 8px"
-					>
-						{audioRouting.audio_follows_video ? 'Follows Video' : 'Independent'}
-					</button>
-				</header>
-				<div class="panel__body flex gap-3">
-					{#each liveSources() as source (source.id)}
-						{@const isAudioSource = audioRouting.audio_follows_video
-							? source.id === programSourceId
-							: source.id === audioRouting.active_audio_source}
-						<button
-							onclick={() => setAudioSource(source.id)}
-							disabled={audioRouting.audio_follows_video}
-							class="row flex-1 text-left {isAudioSource ? 'border-live' : ''} disabled:cursor-default"
-						>
-							<div class="scanlines-well flex h-5 w-12 items-end gap-px border border-border-dim p-px">
-								{#each Array(8) as _, i}
-									<div
-										class="w-1 {isAudioSource ? (i < 6 ? 'bg-live' : i < 7 ? 'bg-warning' : 'bg-danger') : 'bg-border-dim'}"
-										style="height: {isAudioSource ? Math.max(20, Math.random() * 100) : 12}%"
-									></div>
-								{/each}
-							</div>
-							<div class="min-w-0 flex-1">
-								<div class="truncate {isAudioSource ? 'text-amber-bright' : 'text-amber-dim'}">
-									{source.name}
-								</div>
-							</div>
-							{#if isAudioSource}
-								<span class="pill pill--live shrink-0">● ACTIVE</span>
-							{/if}
-						</button>
-					{/each}
-				</div>
-			</section>
-		{/if}
-
-		<!-- Tabbed section: Sources / Library -->
-		<section class="panel">
-			<div class="flex items-center border-b border-border-dim bg-panel-raised">
-				{#each [
-					{ id: 'sources', label: 'Sources' },
-					{ id: 'scenes', label: 'Scenes' },
-					{ id: 'library', label: 'Library' },
-				] as tab}
-					<button
-						onclick={() => (activeTab = tab.id as typeof activeTab)}
-						class="px-5 py-2.5 text-[11px] uppercase tracking-[1px] transition-colors {activeTab === tab.id
-							? 'border-b-2 border-amber text-amber-bright'
-							: 'border-b-2 border-transparent text-amber-dim hover:text-amber'}"
-					>
-						{tab.label}
-					</button>
-				{/each}
-				{#if activeTab === 'sources'}
-					<div class="ml-auto pr-2"><PopoutButton section="sources" width={900} height={600} /></div>
-				{/if}
 			</div>
-
-			<div class="p-4">
-				{#if activeTab === 'sources'}
-					{#if liveStreamSources().length === 0}
-						<p class="text-amber-muted">No live sources. Connect OBS to start.</p>
-					{:else}
-						<div class="grid gap-2" style="grid-template-columns: repeat(auto-fill, minmax(200px, 1fr))">
-							{#each liveStreamSources() as source (source.id)}
-								<div
-									class="rounded-sm border p-1.5 transition-colors {source.id === programSourceId
-										? 'border-danger bg-panel-raised'
-										: source.id === previewSourceId
-											? 'border-live bg-panel-raised'
-											: 'border-border-dim hover:border-border'}"
-								>
-									<VideoPreview
-										sourceId={source.id}
-										label={source.name}
-										active={source.id === programSourceId}
-									/>
-									<div class="mt-1.5 flex gap-1.5">
-										<button
-											onclick={() => { previewSourceId = source.id; }}
-											disabled={source.id === programSourceId}
-											class="btn flex-1 px-2 py-1 text-[10px] {source.id === previewSourceId ? 'btn--go' : ''}"
-										>
-											Next Up
-										</button>
-										<button
-											onclick={() => cutToSource(source.id)}
-											disabled={source.id === programSourceId}
-											class="btn btn--danger flex-1 px-2 py-1 text-[10px]"
-										>
-											Switch
-										</button>
-									</div>
-								</div>
-							{/each}
-						</div>
-					{/if}
-
-				{:else if activeTab === 'scenes'}
-					{#if $scenes.length === 0}
-						<p class="text-amber-muted">No scenes yet. <a href="/scenes" class="text-amber hover:text-amber-bright">Build one ▸</a></p>
-					{:else}
-						<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-							{#each $scenes as scene (scene.id)}
-								<div class="rounded-sm border p-3 {scene.id === programSourceId ? 'border-danger bg-panel-raised' : 'border-border-dim hover:border-border'}">
-									<div class="mb-2 flex items-center justify-between gap-2">
-										<span class="truncate text-amber">{scene.name}</span>
-										<span class="pill {scene.id === programSourceId ? 'pill--live' : 'pill--idle'} text-[9px] shrink-0">
-											{scene.id === programSourceId ? '● LIVE' : `${scene.layers.length} layer${scene.layers.length !== 1 ? 's' : ''}`}
-										</span>
-									</div>
-									<!-- Mini layout diagram: layer boxes at their canvas positions (no video — a live thumbnail would need a second compositor ffmpeg per scene). -->
-									<div class="relative mb-2 aspect-video w-full overflow-hidden rounded-sm border border-border-dim bg-black">
-										{#each [...scene.layers].sort((a, b) => a.z_index - b.z_index) as l (l.id)}
-											<div
-												class="absolute border {l.visible === false ? 'border-dashed border-amber-muted opacity-40' : 'border-amber-dim bg-amber/10'}"
-												style="left:{(l.position.x / outputConfig.width) * 100}%;top:{(l.position.y / outputConfig.height) * 100}%;width:{(l.size.width / outputConfig.width) * 100}%;height:{(l.size.height / outputConfig.height) * 100}%"
-												title="{l.visible === false ? '(hidden) ' : ''}{l.size.width}×{l.size.height} @ {l.position.x},{l.position.y}"
-											></div>
-										{/each}
-										{#if scene.layers.length === 0}
-											<div class="absolute inset-0 flex items-center justify-center text-[10px] text-amber-muted">Empty scene</div>
-										{/if}
-									</div>
-									<button
-										onclick={() => takeScene(scene.id)}
-										disabled={scene.id === programSourceId}
-										class="btn btn--danger w-full"
-									>
-										Take to Program
-									</button>
-								</div>
-							{/each}
-						</div>
-						<p class="mt-3 text-[11px] text-amber-muted"><a href="/scenes" class="text-amber hover:text-amber-bright">Edit scenes ▸</a></p>
-					{/if}
-
-				{:else if activeTab === 'library'}
-					{#if assets.length === 0 && stingers.length === 0}
-						<p class="text-amber-muted">No items in library. <a href="/library" class="text-amber hover:text-amber-bright">Add one ▸</a></p>
-					{:else}
-						{#if assets.length > 0}
-							<div class="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-								{#each assets as asset (asset.id)}
-									<div class="row">
-										<div class="min-w-0 flex-1">
-											<div class="truncate text-amber">{asset.name}</div>
-											<div class="label">{asset.asset_type}</div>
-										</div>
-										<div class="ml-2 flex gap-1">
-											<button
-												onclick={async () => {
-													const source = await api.createSourceFromAsset(asset.id);
-													sources.set(await api.listSources());
-													previewSourceId = source.id;
-													await api.setPreview(source.id).catch(() => {});
-												}}
-												class="btn"
-											>
-												Preview
-											</button>
-											<button
-												onclick={async () => {
-													const source = await api.createSourceFromAsset(asset.id);
-													sources.set(await api.listSources());
-													await cutToSource(source.id);
-												}}
-												class="btn btn--danger"
-											>
-												Switch
-											</button>
-										</div>
-									</div>
-								{/each}
-							</div>
-						{/if}
-					{/if}
-
-				{/if}
-				</div>
-			</section>
+		</section>
+	</div>
 </div>
 
 <Dialog bind:open={showOutput}>
