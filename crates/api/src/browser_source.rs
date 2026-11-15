@@ -153,10 +153,18 @@ pub async fn start_browser_source(
 
     tracing::info!("starting browser source {} -> {}", source_id, url);
 
-    // Drive screenshots into ffmpeg.
+    // Drive frames into ffmpeg. Screencast first: Chrome only sends a frame
+    // when the page actually changes, so a mostly-static page costs almost
+    // nothing (the old capture loop forced 10 full renders + JPEG encodes
+    // per second even when nothing moved). If screencast never delivers a
+    // frame, fall back to the capture loop.
     let st = state.clone();
     tokio::spawn(async move {
-        screenshot_loop(ws_url, ff_stdin, bfps, source_id, st).await;
+        if let Some(stdin) = screencast_loop(ws_url.clone(), ff_stdin, bfps, bw, bh, source_id, st.clone()).await
+        {
+            tracing::info!("browser {}: screencast produced no frames, falling back to screenshots", source_id);
+            screenshot_loop(ws_url, stdin, bfps, source_id, st).await;
+        }
     });
 
     // Read the encoded output into the relay.
@@ -200,6 +208,131 @@ async fn wait_for_page_ws(port: u16) -> Result<String, String> {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     Err("chrome devtools did not come up".to_string())
+}
+
+/// Drive Chrome's screencast into ffmpeg: Chrome sends a JPEG frame only when
+/// the page changes, so a static page (overlay, alert box, mostly-idle site)
+/// costs ~0 CPU instead of a forced capture every 100 ms. The last frame is
+/// re-sent to ffmpeg at the requested fps, because ffmpeg's image2pipe +
+/// fps filter produces NOTHING from sparse input (measured on the S905W:
+/// 1 JPEG every 3 s -> 0 bytes of FLV; 10 fps -> output). Re-sending the
+/// same JPEG is cheap (no re-render, no re-capture); the saving is all on
+/// Chrome's side. Returns `Some(stdin)` when screencast never delivered a
+/// frame (caller falls back to the screenshot loop), `None` once it ran (a
+/// later death is a real outage, not a reason to retry screenshots).
+async fn screencast_loop(
+    ws_url: String,
+    mut ff_stdin: tokio::process::ChildStdin,
+    fps: u32,
+    width: u32,
+    height: u32,
+    source_id: Uuid,
+    state: Arc<AppState>,
+) -> Option<tokio::process::ChildStdin> {
+    let (ws, _) = match tokio_tungstenite::connect_async(&ws_url).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("browser {}: devtools connect failed: {}", source_id, e);
+            return Some(ff_stdin);
+        }
+    };
+    let (mut sink, mut stream) = ws.split();
+    use tokio_tungstenite::tungstenite::Message;
+
+    let _ = sink
+        .send(Message::Text(r#"{"id":1,"method":"Page.enable"}"#.into()))
+        .await;
+
+    // Screencast runs at the page's frame rate (~60 fps); everyNthFrame caps
+    // it at the requested fps. Frames are still only sent on change.
+    let every_nth = (60 / fps.max(1)).max(1);
+    let start_req = format!(
+        r#"{{"id":2,"method":"Page.startScreencast","params":{{"format":"jpeg","quality":70,"maxWidth":{},"maxHeight":{},"everyNthFrame":{}}}}}"#,
+        width, height, every_nth
+    );
+    if sink.send(Message::Text(start_req.into())).await.is_err() {
+        return Some(ff_stdin);
+    }
+
+    // Wait for the startScreencast response (id 2); an error means this
+    // Chrome can't screencast — fall back to screenshots.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut started = false;
+    while tokio::time::Instant::now() < deadline {
+        let next = tokio::time::timeout_at(deadline, stream.next()).await;
+        let Some(Ok(Message::Text(txt))) = next.ok().flatten() else {
+            break;
+        };
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+            if v.get("id").and_then(|x| x.as_u64()) == Some(2) {
+                started = v.get("error").is_none();
+                break;
+            }
+        }
+    }
+    if !started {
+        tracing::warn!("browser {}: screencast not available, falling back", source_id);
+        return Some(ff_stdin);
+    }
+
+    let mut frames: u64 = 0;
+    let mut last_frame: Option<Vec<u8>> = None;
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
+        1000 / fps.max(1) as u64,
+    ));
+    loop {
+        if state.browser_sources.read().await.get(&source_id).is_none() {
+            break; // torn down
+        }
+        tokio::select! {
+            msg = stream.next() => {
+                let Some(msg) = msg else { break }; // WS closed
+                let Ok(Message::Text(txt)) = msg else { continue };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
+                if v.get("method").and_then(|m| m.as_str()) != Some("Page.screencastFrame") {
+                    continue;
+                }
+                let Some(params) = v.get("params") else { continue };
+                let Some(session) = params.get("sessionId").and_then(|s| s.as_u64()) else { continue };
+                // Ack first so Chrome keeps sending; a failed ack means the
+                // connection is dead.
+                let ack = format!(
+                    r#"{{"id":{},"method":"Page.screencastFrameAck","params":{{"sessionId":{}}}}}"#,
+                    1000 + frames, session
+                );
+                if sink.send(Message::Text(ack.into())).await.is_err() {
+                    break;
+                }
+                if let Some(b64) = params.get("data").and_then(|d| d.as_str()) {
+                    use base64::Engine;
+                    if let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                        frames += 1;
+                        if ff_stdin.write_all(&jpeg).await.is_err() {
+                            break;
+                        }
+                        last_frame = Some(jpeg);
+                    }
+                }
+            }
+            _ = ticker.tick() => {
+                // Keep ffmpeg fed at a steady rate: sparse input produces
+                // no output at all (see doc comment above).
+                if let Some(jpeg) = &last_frame {
+                    if ff_stdin.write_all(jpeg).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if frames == 0 {
+        // Screencast started but never produced a frame (page never painted
+        // within the session) — let the caller try screenshots.
+        return Some(ff_stdin);
+    }
+    tracing::info!("browser {}: screencast ended after {} frames", source_id, frames);
+    None
 }
 
 async fn screenshot_loop(

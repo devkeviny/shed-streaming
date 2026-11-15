@@ -18,28 +18,23 @@
 	import { popout } from '$lib/popout';
 	import PopoutButton from '../../components/PopoutButton.svelte';
 	import { Checkbox } from '$lib/components/ui/checkbox';
-	import Dialog from '$lib/components/ui/dialog/Dialog.svelte';
+	import SettingsDialog from '../../components/SettingsDialog.svelte';
 	import { notify } from '$lib/notify';
 
-	// Output config popup
-	let showOutput = $state(false);
-	let draft = $state<OutputConfig>({
-		video_bitrate_kbps: 4500,
-		audio_bitrate_kbps: 160,
-		width: 1920,
-		height: 1080,
-		fps: 30,
-		video_encoder: 'libx264',
-		egress_copy_video: false,
-	});
-	let resSelect = $state('1080p');
-	const RES_PRESETS = [
-		{ label: '2160p', w: 3840, h: 2160 },
-		{ label: '1440p', w: 2560, h: 1440 },
-		{ label: '1080p', w: 1920, h: 1080 },
-		{ label: '720p', w: 1280, h: 720 },
-		{ label: '480p', w: 854, h: 480 },
-	];
+	// OBS-style settings window (Output / Stream / Audio / Browser).
+	let showSettings = $state(false);
+	let settingsTab = $state<'output' | 'stream' | 'audio' | 'browser'>('output');
+
+	async function refreshSettingsState() {
+		const [outConfig, ar, savedConfig] = await Promise.all([
+			api.getOutputConfig().catch(() => null),
+			api.getAudioRouting().catch(() => null),
+			api.getBroadcastConfig().catch(() => null),
+		]);
+		if (outConfig) outputConfig = outConfig;
+		if (ar) audioRouting = ar;
+		if (savedConfig) config = savedConfig;
+	}
 
 	let programSourceId = $state<string | null>(null);
 	let previewSourceId = $state<string | null>(null);
@@ -357,37 +352,9 @@
 		}
 	}
 
-	async function saveOutputConfig() {
-		try {
-			outputConfig = await api.setOutputConfig(outputConfig);
-		} catch (e) {
-			notify.error(e);
-		}
-	}
-
-	function openOutput() {
-		draft = { ...outputConfig };
-		const m = RES_PRESETS.find((p) => p.w === draft.width && p.h === draft.height);
-		resSelect = m ? m.label : 'custom';
-		showOutput = true;
-	}
-
-	function onResChange() {
-		const p = RES_PRESETS.find((x) => x.label === resSelect);
-		if (p) {
-			draft.width = p.w;
-			draft.height = p.h;
-		}
-	}
-
-	async function saveOutput() {
-		try {
-			outputConfig = await api.setOutputConfig(draft);
-			showOutput = false;
-			notify.success($isLive ? 'Output config applied' : 'Output config saved');
-		} catch (e) {
-			notify.error(e);
-		}
+	function openSettings(tab: 'output' | 'stream' | 'audio' | 'browser' = 'output') {
+		settingsTab = tab;
+		showSettings = true;
 	}
 
 	function formatBytes(bytes: number): string {
@@ -443,6 +410,13 @@
 	<div class="mb-4 flex items-center justify-between border-b border-border pb-3">
 		<h1 class="text-[13px] tracking-widest text-amber-bright">STUDIO</h1>
 		<div class="flex items-center gap-3">
+			<button
+				onclick={() => openSettings('output')}
+				class="btn btn--ghost"
+				style="min-height:24px;padding:2px 10px"
+			>
+				⚙ Settings
+			</button>
 			<StatusIndicator state={$pipelineState} />
 			{#if $isLive && $pipelineState.state === 'live'}
 				<span class="led text-[18px]">{formatDuration(outputStats.duration_secs)}</span>
@@ -820,10 +794,10 @@
 					<div class="flex items-center justify-between">
 						<span class="label">Output</span>
 						<button
-							onclick={openOutput}
+							onclick={() => openSettings('output')}
 							class="btn btn--ghost"
 							style="min-height:20px;padding:1px 8px;font-size:11px"
-							aria-label="Edit output config">Edit</button
+							aria-label="Open settings">Settings</button
 						>
 					</div>
 					<div class="flex justify-between">
@@ -901,72 +875,4 @@
 	</div>
 </div>
 
-<Dialog bind:open={showOutput}>
-	<div class="panel w-[380px] max-w-[90vw]">
-		<header class="panel__head flex items-center justify-between">
-			<span>▮ OUTPUT CONFIG</span>
-			<button onclick={() => (showOutput = false)} class="text-amber-muted hover:text-amber-bright" aria-label="Close">✕</button>
-		</header>
-		<div class="panel__body space-y-3">
-			{#if $isLive}
-				<p class="text-[11px] text-amber-bright">You are live. Saving will briefly reconnect your destinations.</p>
-			{/if}
-			<div>
-				<label class="field-label" for="oc-res">Resolution</label>
-				<select id="oc-res" bind:value={resSelect} onchange={onResChange} class="select w-full">
-					{#each RES_PRESETS as p}<option value={p.label}>{p.label} ({p.w}x{p.h})</option>{/each}
-					<option value="custom">Custom</option>
-				</select>
-			</div>
-			{#if resSelect === 'custom'}
-				<div class="grid grid-cols-2 gap-2">
-					<div>
-						<label class="field-label" for="oc-w">Width</label>
-						<input id="oc-w" type="number" min="160" max="3840" bind:value={draft.width} class="input" />
-					</div>
-					<div>
-						<label class="field-label" for="oc-h">Height</label>
-						<input id="oc-h" type="number" min="120" max="2160" bind:value={draft.height} class="input" />
-					</div>
-				</div>
-			{/if}
-			<div>
-				<label class="field-label" for="oc-fps">Frame rate</label>
-				<select id="oc-fps" bind:value={draft.fps} class="select w-full">
-					{#each [24, 25, 30, 50, 60] as f}<option value={f}>{f} fps</option>{/each}
-				</select>
-			</div>
-			<div>
-				<label class="field-label" for="oc-vb">Video bitrate (kbps)</label>
-				<input id="oc-vb" type="number" min="500" max="20000" step="100" bind:value={draft.video_bitrate_kbps} class="input" />
-			</div>
-			<div>
-				<label class="field-label" for="oc-ab">Audio bitrate (kbps)</label>
-				<select id="oc-ab" bind:value={draft.audio_bitrate_kbps} class="select w-full">
-					{#each [96, 128, 160, 192, 256] as a}<option value={a}>{a} kbps</option>{/each}
-				</select>
-			</div>
-			<div>
-				<label class="field-label" for="oc-enc">Video encoder</label>
-				<select id="oc-enc" bind:value={draft.video_encoder} class="select w-full">
-					<option value="libx264">libx264 (software)</option>
-					<option value="h264_v4l2m2m">h264_v4l2m2m (hardware, V4L2)</option>
-				</select>
-				<p class="mt-1 text-[11px] text-amber-muted">
-					Use the hardware encoder on boxes with a V4L2 H.264 encoder (e.g. Amlogic S905W) — software x264 can't reach realtime at 1080p there.
-				</p>
-			</div>
-			<label class="flex items-start gap-2 text-[12px] text-amber-dim">
-				<input type="checkbox" bind:checked={draft.egress_copy_video} class="mt-0.5" />
-				<span>
-					Pass program video through to RTMP without re-encoding
-					<span class="block text-[11px] text-amber-muted">Saves one full encode per destination. Only correct when the program comes from a scene (the compositor already outputs H.264 at this canvas).</span>
-				</span>
-			</label>
-			<div class="flex gap-2 pt-1">
-				<button onclick={saveOutput} class="btn btn--go">Save</button>
-				<button onclick={() => (showOutput = false)} class="btn btn--ghost">Cancel</button>
-			</div>
-		</div>
-	</div>
-</Dialog>
+<SettingsDialog bind:open={showSettings} initialTab={settingsTab} isLive={$isLive} onSaved={refreshSettingsState} />
