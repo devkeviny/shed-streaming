@@ -116,6 +116,8 @@
 				? 'Text'
 				: source.kind.type === 'color'
 				? 'Color'
+				: source.kind.type === 'http_stream'
+				? 'Stream'
 				: source.kind.type}
 		</span>
 	</div>
@@ -135,6 +137,10 @@
 		<div class="mt-2 flex items-center gap-2 text-xs text-amber-dim">
 			<span class="inline-block h-4 w-4 rounded-sm border border-border" style="background:{source.kind.color}"></span>
 			{source.kind.color} · {source.kind.width}×{source.kind.height}
+		</div>
+	{:else if source.kind.type === 'http_stream'}
+		<div class="mt-2 truncate text-xs text-amber-dim" title={source.kind.url}>
+			{source.kind.url}
 		</div>
 	{/if}
 	{#if source.kind.type === 'rtmp' || source.kind.type === 'srt' || source.kind.type === 'web_rtc'}

@@ -140,6 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         guest_peers: RwLock::new(std::collections::HashMap::new()),
         whip_sessions: RwLock::new(std::collections::HashMap::new()),
         scene_compositors: RwLock::new(std::collections::HashMap::new()),
+        compositor_generations: RwLock::new(std::collections::HashMap::new()),
         browser_sources: RwLock::new(std::collections::HashMap::new()),
         local_sources: RwLock::new(std::collections::HashMap::new()),
         program_tx,
@@ -203,6 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         | muxshed_common::SourceKind::AudioInput { .. }
                         | muxshed_common::SourceKind::Text { .. }
                         | muxshed_common::SourceKind::Color { .. }
+                        | muxshed_common::SourceKind::HttpStream { .. }
                 ) {
                     if let Ok(id) = id_str.parse::<uuid::Uuid>() {
                         let s = state.clone();

@@ -18,7 +18,8 @@ export type SourceKind =
 	| { type: 'video_capture'; device: string; width: number; height: number; fps: number }
 	| { type: 'audio_input'; device: string }
 	| { type: 'text'; text: string; font_size: number; font_color: string; bg_color: string; width: number; height: number }
-	| { type: 'color'; color: string; width: number; height: number };
+	| { type: 'color'; color: string; width: number; height: number }
+	| { type: 'http_stream'; url: string };
 
 export interface CaptureDevice {
 	id: string;

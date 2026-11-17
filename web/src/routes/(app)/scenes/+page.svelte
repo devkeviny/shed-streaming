@@ -2,8 +2,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
-	import { scenes, sources, pipelineState } from '$lib/stores/pipeline';
+	import { scenes, sources } from '$lib/stores/pipeline';
 	import { notify } from '$lib/notify';
+	import VideoPreview from '../../../components/VideoPreview.svelte';
 	import type { Scene, Layer, Asset } from '$lib/types';
 
 	const OUT_W = 1920;
@@ -38,13 +39,20 @@
 		}
 	});
 
+	// Scene currently on program (compositing), independent of whether the
+	// broadcast is live. The broadcast pipeline state only carries an
+	// active_scene while streaming, so the canvas video must use the
+	// program router state instead — otherwise the preview never shows
+	// until Go Live is pressed.
+	let programSceneId = $state<string | null>(null);
+
 	async function refresh() {
 		const list = await api.listScenes();
 		scenes.set(list);
 		editing = editing ? (list.find((s) => s.id === editing!.id) ?? null) : (list[0] ?? null);
+		const prog = await api.getProgram().catch(() => null);
+		programSceneId = prog?.program_source_id ?? null;
 	}
-
-	const activeId = $derived($pipelineState.state === 'live' ? $pipelineState.active_scene : null);
 
 	const orderedLayers = $derived(
 		editing ? [...editing.layers].sort((a, b) => a.z_index - b.z_index) : []
@@ -115,6 +123,7 @@
 	async function activate(id: string) {
 		try {
 			await api.activateScene(id);
+			await refresh();
 			notify.success('Scene is live');
 		} catch (e) {
 			notify.error(e);
@@ -194,10 +203,18 @@
 		drag = { id: l.id, mode, sx: e.clientX, sy: e.clientY, ox: l.position.x, oy: l.position.y, ow: l.size.width, oh: l.size.height };
 		window.addEventListener('pointermove', onMove);
 		window.addEventListener('pointerup', onUp);
+		window.addEventListener('pointercancel', onUp);
 	}
 
 	function onMove(e: PointerEvent) {
 		if (!drag || !editing || !canvasEl) return;
+		// If pointerup was missed (released outside the browser window),
+		// the drag would otherwise follow the pointer forever with no
+		// button held — end it (and save) as soon as no button is down.
+		if (e.buttons === 0) {
+			onUp();
+			return;
+		}
 		const rect = canvasEl.getBoundingClientRect();
 		const dx = ((e.clientX - drag.sx) / rect.width) * outW;
 		const dy = ((e.clientY - drag.sy) / rect.height) * outH;
@@ -215,6 +232,7 @@
 	async function onUp() {
 		window.removeEventListener('pointermove', onMove);
 		window.removeEventListener('pointerup', onUp);
+		window.removeEventListener('pointercancel', onUp);
 		const d = drag;
 		drag = null;
 		if (d && editing) {
@@ -291,8 +309,8 @@
 							class="rack-item flex-1 justify-between {editing?.id === scene.id ? 'rack-item--active' : ''}"
 						>
 							<span class="truncate">{scene.name}</span>
-							<span class="pill {activeId === scene.id ? 'pill--live' : 'pill--idle'} text-[9px]">
-								{activeId === scene.id ? '● LIVE' : scene.layers.length}
+							<span class="pill {programSceneId === scene.id ? 'pill--live' : 'pill--idle'} text-[9px]">
+								{programSceneId === scene.id ? '● LIVE' : scene.layers.length}
 							</span>
 						</button>
 						<button onclick={() => duplicate(scene.id)} class="btn btn--ghost shrink-0 px-2" title="Duplicate scene" aria-label="Duplicate scene">⧉</button>
@@ -325,6 +343,21 @@
 						style="aspect-ratio: 16 / 9"
 						onpointerdown={() => (selectedLayer = null)}
 					>
+						<!-- Live preview behind the layer boxes, OBS-style: the
+						compositor publishes to the scene's media relay, so the
+						scene id works as a preview id. Only while this scene
+						is on program — otherwise the canvas stays a black
+						schematic (no relay exists for an inactive scene). The
+						player is recreated per scene (VideoPreview binds its
+						source id once, on mount). pointer-events-none keeps
+						all interaction on the layer boxes and the canvas. -->
+						{#if programSceneId === editing.id}
+							{#key editing.id}
+								<div class="pointer-events-none absolute inset-0">
+									<VideoPreview sourceId={editing.id} />
+								</div>
+							{/key}
+						{/if}
 						{#each orderedLayers as l (l.id)}
 							<!-- svelte-ignore a11y_no_static_element_interactions -->
 							<div

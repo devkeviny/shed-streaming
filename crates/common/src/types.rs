@@ -56,6 +56,10 @@ pub enum SourceKind {
         width: u32,
         height: u32,
     },
+    /// A remote stream pulled over the network: an HLS playlist (.m3u8),
+    /// an RTSP URL, or any plain HTTP video URL ffmpeg can read. The
+    /// stream is normalized to the output canvas like an RTMP source.
+    HttpStream { url: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema, PartialEq)]
@@ -373,6 +377,7 @@ mod tests {
         assert_eq!(to_value(SourceKind::WebRtc { token: "t".into() }).unwrap()["type"], "web_rtc");
         assert_eq!(to_value(SourceKind::TestPattern).unwrap()["type"], "test_pattern");
         assert_eq!(to_value(SourceKind::Browser { url: "u".into() }).unwrap()["type"], "browser");
+        assert_eq!(to_value(SourceKind::HttpStream { url: "u".into() }).unwrap()["type"], "http_stream");
         let mf = SourceKind::MediaFile {
             asset_id: Uuid::nil(),
             file_path: "/a.mp4".into(),
@@ -390,6 +395,7 @@ mod tests {
             SourceKind::WebRtc { token: "tok".into() },
             SourceKind::TestPattern,
             SourceKind::Browser { url: "https://example.com".into() },
+            SourceKind::HttpStream { url: "https://example.com/live.m3u8".into() },
             SourceKind::MediaFile {
                 asset_id: Uuid::new_v4(),
                 file_path: "/v.mp4".into(),

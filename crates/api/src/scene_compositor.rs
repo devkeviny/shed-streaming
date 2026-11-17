@@ -105,10 +105,19 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
         last_frame: std::sync::Mutex::new(std::time::Instant::now()),
         restarts: AtomicU32::new(0),
     });
+    // Bump the generation BEFORE starting: any watchdog from a previous
+    // activation of this scene is now stale and must exit instead of
+    // killing the new compositor (its watch never gets frame updates).
+    let generation = {
+        let mut gens = state.compositor_generations.write().await;
+        let g = gens.get(&scene_id).copied().unwrap_or(0) + 1;
+        gens.insert(scene_id, g);
+        g
+    };
     start_scene_compositor_inner(state.clone(), scene_id, watch.clone()).await?;
     let wd_state = state.clone();
     tokio::spawn(async move {
-        compositor_watchdog(wd_state, scene_id, watch).await;
+        compositor_watchdog(wd_state, scene_id, watch, generation).await;
     });
     Ok(())
 }
@@ -306,7 +315,12 @@ async fn start_scene_compositor_inner(
 /// grace period, or the process exits while the scene is still on program,
 /// the compositor is restarted (up to a cap, then it gives up and the program
 /// stays black rather than restart-looping forever).
-async fn compositor_watchdog(state: Arc<AppState>, scene_id: Uuid, watch: Arc<CompositorWatch>) {
+async fn compositor_watchdog(
+    state: Arc<AppState>,
+    scene_id: Uuid,
+    watch: Arc<CompositorWatch>,
+    generation: u64,
+) {
     // Grace period: the compositor needs time to open its TCP inputs and
     // prime the first frames before any frame is expected. The clock resets
     // on every restart: on a loaded box a multi-layer scene can need the
@@ -322,6 +336,22 @@ async fn compositor_watchdog(state: Arc<AppState>, scene_id: Uuid, watch: Arc<Co
         tokio::time::sleep(Duration::from_secs(2)).await;
         // Scene no longer on program (cut away / stopped) — nothing to watch.
         if *state.program_intent.borrow() != Some(scene_id) {
+            return;
+        }
+        // Superseded by a newer activation of this scene — the new
+        // compositor updates a different watch, so this one would see a
+        // permanent stall and kill a healthy compositor.
+        let current = state
+            .compositor_generations
+            .read()
+            .await
+            .get(&scene_id)
+            .copied();
+        if current != Some(generation) {
+            tracing::debug!(
+                "compositor watchdog: scene {} superseded (generation {} != {}), exiting",
+                scene_id, generation, current.unwrap_or(0)
+            );
             return;
         }
         let running = state.scene_compositors.read().await.contains_key(&scene_id);

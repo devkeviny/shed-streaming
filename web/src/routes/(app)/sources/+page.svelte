@@ -8,9 +8,10 @@
 	import type { SourceKind } from '$lib/types';
 
 	let name = $state('');
-	let protocol = $state<'rtmp' | 'srt' | 'browser' | 'webrtc' | 'video_capture' | 'audio_input' | 'text' | 'color'>('rtmp');
+	let protocol = $state<'rtmp' | 'srt' | 'browser' | 'webrtc' | 'video_capture' | 'audio_input' | 'text' | 'color' | 'http_stream'>('rtmp');
 	let srtPassphrase = $state('');
 	let browserUrl = $state('');
+	let streamUrl = $state('');
 	let creating = $state(false);
 	let canvas = $state({ width: 1920, height: 1080 });
 	// OBS-style local sources (devices on the Muxshed host itself).
@@ -71,6 +72,9 @@
 				kind = { type: 'text', text: textContent.trim(), font_size: textFontSize, font_color: textFontColor, bg_color: textBgColor, width: textWidth, height: textHeight };
 			} else if (protocol === 'color') {
 				kind = { type: 'color', color: colorValue, width: colorWidth, height: colorHeight };
+			} else if (protocol === 'http_stream') {
+				if (!streamUrl.trim()) return;
+				kind = { type: 'http_stream', url: streamUrl.trim() };
 			} else {
 				kind = { type: 'rtmp', stream_key: '' };
 			}
@@ -78,6 +82,7 @@
 			name = '';
 			srtPassphrase = '';
 			browserUrl = '';
+			streamUrl = '';
 			textContent = '';
 			await refresh();
 			notify.success('Source added');
@@ -106,6 +111,7 @@
 							<option value="audio_input">Audio Input (microphone)</option>
 							<option value="text">Text</option>
 							<option value="color">Color Source</option>
+							<option value="http_stream">Stream URL (M3U / HLS / RTSP)</option>
 						</select>
 					</div>
 					<div class="flex-1">
@@ -138,6 +144,17 @@
 							class="input"
 						/>
 					</div>
+				{:else if protocol === 'http_stream'}
+					<div>
+						<label class="field-label" for="source-stream-url">Stream URL</label>
+						<input
+							id="source-stream-url"
+							bind:value={streamUrl}
+							placeholder="https://…/live.m3u8 or rtsp://camera/live"
+							class="input"
+						/>
+					</div>
+					<p class="text-xs text-amber-muted">HLS playlist (.m3u8), RTSP or plain HTTP video. Pulled by the box and normalized to the output canvas.</p>
 				{:else if protocol === 'video_capture'}
 					<div class="flex gap-3">
 						<div class="flex-1">

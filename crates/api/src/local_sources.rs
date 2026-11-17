@@ -11,6 +11,9 @@
 //!   "Text (GDI+)". H.264 has no alpha channel, so a transparent text layer
 //!   is not possible in this pipeline; the background color is the backdrop.
 //! - Color: a solid color video signal — OBS "Color Source".
+//! - HttpStream: a remote stream pulled over the network (HLS .m3u8, RTSP,
+//!   plain HTTP video) — OBS "Media Source" with a URL. Normalized to the
+//!   output canvas like an RTMP source.
 //!
 //! Images need no separate kind: a MediaFile source already loops still
 //! images (png/jpg/gif/webp/...). Window/display capture has no meaning on
@@ -195,6 +198,7 @@ fn kind_label(kind: &SourceKind) -> &'static str {
         SourceKind::AudioInput { .. } => "alsa",
         SourceKind::Text { .. } => "text",
         SourceKind::Color { .. } => "color",
+        SourceKind::HttpStream { .. } => "http_stream",
         _ => "local",
     }
 }
@@ -315,6 +319,55 @@ fn build_args(kind: &SourceKind, cfg: &OutputConfig) -> Result<Vec<String>, Stri
                 "-an".into(),
                 "-f".into(),
                 "flv".into(),
+                "pipe:1".into(),
+            ]);
+            Ok(args)
+        }
+        SourceKind::HttpStream { url } => {
+            // Pull a remote stream: HLS (.m3u8), RTSP, or any HTTP video
+            // ffmpeg can read. NO -re: a live stream is already
+            // realtime-paced, and -re would throttle a faster-than-realtime
+            // file/VOD URL to 1x for no reason. Normalized to the output
+            // canvas exactly like the RTMP normalizer (scale + pad + fps +
+            // hardware encode). -rw_timeout keeps a dead URL from hanging
+            // the ffmpeg forever (10 s, in microseconds).
+            let vf = format!(
+                "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
+                cfg.width, cfg.height, cfg.width, cfg.height
+            );
+            let mut args: Vec<String> = vec![
+                "-hide_banner".into(),
+                "-loglevel".into(),
+                "warning".into(),
+                "-rw_timeout".into(),
+                "10000000".into(),
+                "-i".into(),
+                url.clone(),
+                "-vf".into(),
+                vf,
+            ];
+            crate::encoder::push_encoder_args(&mut args, cfg.video_encoder, "veryfast");
+            args.extend([
+                "-g".into(),
+                format!("{}", cfg.fps * 2),
+                "-r".into(),
+                format!("{}", cfg.fps),
+                "-b:v".into(),
+                format!("{}k", cfg.video_bitrate_kbps),
+                "-maxrate".into(),
+                format!("{}k", cfg.video_bitrate_kbps),
+                "-bufsize".into(),
+                format!("{}k", cfg.video_bitrate_kbps * 2),
+                "-c:a".into(),
+                "aac".into(),
+                "-b:a".into(),
+                format!("{}k", cfg.audio_bitrate_kbps),
+                "-ar".into(),
+                "48000".into(),
+                "-f".into(),
+                "flv".into(),
+                "-flvflags".into(),
+                "no_duration_filesize".into(),
                 "pipe:1".into(),
             ]);
             Ok(args)

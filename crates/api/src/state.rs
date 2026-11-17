@@ -30,6 +30,12 @@ pub struct AppState {
     pub whip_sessions: RwLock<HashMap<Uuid, Uuid>>,
     /// Scene compositors (ffmpeg) keyed by scene id — composite a scene's layers
     pub scene_compositors: RwLock<HashMap<Uuid, tokio::process::Child>>,
+    /// Compositor watchdog generation per scene. Bumped every time a scene is
+    /// (re)activated: the old watchdog's `watch` goes stale (the new
+    /// compositor updates the new watch), and without this the stale watchdog
+    /// would keep killing the healthy compositor every ~6 s. A watchdog exits
+    /// as soon as its generation is no longer current.
+    pub compositor_generations: RwLock<HashMap<Uuid, u64>>,
     /// Headless Chrome processes for browser sources
     pub browser_sources: RwLock<HashMap<Uuid, tokio::process::Child>>,
     /// Local capture sources (V4L2 camera, ALSA audio, text, color) — one

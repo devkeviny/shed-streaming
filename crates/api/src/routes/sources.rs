@@ -104,14 +104,15 @@ pub async fn create(
         });
     }
 
-    // Local capture sources (V4L2 camera, ALSA audio, text, color) start
-    // their ffmpeg immediately, in the background.
+    // Local capture sources (V4L2 camera, ALSA audio, text, color, network
+    // stream) start their ffmpeg immediately, in the background.
     if matches!(
         &kind,
         SourceKind::VideoCapture { .. }
             | SourceKind::AudioInput { .. }
             | SourceKind::Text { .. }
             | SourceKind::Color { .. }
+            | SourceKind::HttpStream { .. }
     ) {
         let st = state.clone();
         let k = kind.clone();
@@ -209,6 +210,7 @@ pub async fn update(
                 | SourceKind::AudioInput { .. }
                 | SourceKind::Text { .. }
                 | SourceKind::Color { .. }
+                | SourceKind::HttpStream { .. }
         ) {
             let st = state.clone();
             let k = kind.clone();
